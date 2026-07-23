@@ -1,12 +1,11 @@
 import { z } from 'zod';
-import { PlatformVariantSchema } from './edl.js';
+const PlatformVariantSchema = z.enum(['YT_SHORTS_9_16', 'TIKTOK_9_16', 'IG_REELS_9_16']);
 
 /**
- * BrandRules — the structured output of parsing a workspace's `brand.skill.md`.
+ * BrandRules is the structured form of a workspace brand contract.
  *
  * Hand-authored markdown is friendlier for humans to maintain; this schema
- * is what renderers + atomizers enforce at runtime. The parser lives in
- * `workers/render/src/brand/parser.ts`.
+ * is what candidate validation and rendering enforce at runtime.
  */
 
 export const HexColorSchema = z
@@ -32,7 +31,7 @@ export const TypographySchema = z.object({
 });
 
 export const CaptionRegisterRulesSchema = z.object({
-  /** Human-language description of the tone Claude should match. */
+  /** Human-language description of the tone an editorial provider should match. */
   tone: z.string().optional(),
   /** Hard character cap for caption text (useful for TikTok-style karaoke lines) */
   maxCharsPerLine: z.number().int().positive().optional(),
@@ -56,11 +55,10 @@ export const BrandRulesSchema = z.object({
    */
   forbiddenPhrases: z.array(z.string()).default([]),
   /**
-   * Sample lines that exemplify the brand voice. Fed into Claude's prompt
-   * at atomize-time so generated copy matches tone.
+   * Sample lines that exemplify the brand voice for provider-assisted ranking.
    */
   toneSamples: z.array(z.string()).default([]),
-  /** Per-variant overrides (e.g. LinkedIn caption rules differ from TikTok's) */
+  /** Per-variant caption overrides. */
   perVariant: z
     .record(PlatformVariantSchema, CaptionRegisterRulesSchema)
     .default({}),

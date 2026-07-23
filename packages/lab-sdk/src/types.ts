@@ -2,26 +2,20 @@
 // decoupled from Prisma's generated types (which would drag @prisma/client
 // into every consumer).
 
-export type Plan = 'FREE' | 'STARTER' | 'STUDIO' | 'AGENCY';
 export type Role = 'OWNER' | 'ADMIN' | 'EDITOR' | 'VIEWER';
 
 export type ProjectStatus = 'DRAFT' | 'INGESTING' | 'READY' | 'ARCHIVED';
 
 export type AssetKind =
   | 'RAW'
-  | 'TRANSCRIPT'
-  | 'SCENE_DATA'
-  | 'EDIT_DECISION'
+  | 'ANALYSIS'
   | 'SCRATCH'
   | 'DELIVERABLE';
 
 export type PlatformVariant =
-  | 'LINKEDIN_16_9'
-  | 'YT_LONG_16_9'
   | 'YT_SHORTS_9_16'
   | 'TIKTOK_9_16'
-  | 'IG_REELS_9_16'
-  | 'FB_FEED_16_9';
+  | 'IG_REELS_9_16';
 
 export type JobStatus =
   | 'QUEUED'
@@ -31,8 +25,8 @@ export type JobStatus =
   | 'HALTED_BRAND_VIOLATION'
   | 'CANCELLED';
 
-export type Platform = 'YOUTUBE' | 'LINKEDIN' | 'TIKTOK' | 'INSTAGRAM' | 'FACEBOOK';
-export type PublishStatus = 'PENDING' | 'PUBLISHED' | 'FAILED';
+export type Platform = 'YOUTUBE';
+export type PublishStatus = 'PENDING' | 'UPLOADING' | 'PUBLISHED' | 'FAILED' | 'AMBIGUOUS';
 
 export interface Project {
   id: string;
@@ -48,8 +42,8 @@ export interface Asset {
   id: string;
   projectId: string;
   kind: AssetKind;
-  r2Bucket: string;
-  r2Key: string;
+  managedUri: string;
+  generation?: string | null;
   mimeType?: string | null;
   sizeBytes: number;
   durationMs?: number | null;
@@ -71,7 +65,7 @@ export interface RenderJob {
 }
 
 export interface PresignedUpload {
-  assetId: string;
-  url: string;
+  uploadSessionId: string;
+  sessionUri: string;
   expiresAt: string;
 }

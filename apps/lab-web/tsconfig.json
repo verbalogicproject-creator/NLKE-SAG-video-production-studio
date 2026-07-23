@@ -1,15 +1,33 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "plugins": [{ "name": "next" }],
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
     "paths": {
-      "@/*": ["./*"],
-      "@/lib/*": ["./lib/*"],
-      "@/components/*": ["./components/*"],
-      "@/styles/*": ["./styles/*"],
-      "@verbalogix/lab-sdk": ["../../packages/lab-sdk/src"],
-      "@verbalogix/media-contracts": ["../../packages/media-contracts/src"]
-    }
+      "@/*": [
+        "./*"
+      ],
+      "@/lib/*": [
+        "./lib/*"
+      ],
+      "@/components/*": [
+        "./components/*"
+      ],
+      "@/styles/*": [
+        "./styles/*"
+      ],
+      "@verbalogix/lab-sdk": [
+        "../../packages/lab-sdk/src"
+      ],
+      "@verbalogix/media-contracts": [
+        "../../packages/media-contracts/src"
+      ]
+    },
+    "allowJs": true,
+    "noEmit": true
   },
   "include": [
     "next-env.d.ts",
@@ -17,5 +35,9 @@
     "**/*.tsx",
     ".next/types/**/*.ts"
   ],
-  "exclude": ["node_modules", ".next", "dist"]
+  "exclude": [
+    "node_modules",
+    ".next",
+    "dist"
+  ]
 }

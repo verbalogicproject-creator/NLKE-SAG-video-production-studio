@@ -37,7 +37,6 @@ PYTHONPATH=src uvicorn sag_video.observer_app:app --host 127.0.0.1 --port 8082 >
 SAG_VIDEO_OBSERVER_URL=http://127.0.0.1:8082 PYTHONPATH=src uvicorn sag_video.app:app --host 127.0.0.1 --port 8080 >"$RUN_DIR/engine.log" 2>&1 & echo $! >"$RUN_DIR/engine.pid"
 
 cd "$REPO_DIR"
-pnpm --filter @verbalogix/orchestrator dev >"$RUN_DIR/orchestrator.log" 2>&1 & echo $! >"$RUN_DIR/orchestrator.pid"
 pnpm --filter @verbalogix/web dev >"$RUN_DIR/web.log" 2>&1 & echo $! >"$RUN_DIR/web.pid"
 
 echo "Chamber starting: http://127.0.0.1:3000/dashboard"

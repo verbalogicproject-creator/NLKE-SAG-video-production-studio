@@ -4,14 +4,22 @@ import type {
   EngineJob,
   EngineSuggestion,
 } from '@verbalogix/media-contracts';
+import { GoogleAuth } from 'google-auth-library';
 
 const baseUrl = () => (process.env.SAG_ENGINE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 
-function headers(workspaceId: string, json = true): HeadersInit {
+let identityClient: Awaited<ReturnType<GoogleAuth['getIdTokenClient']>> | undefined;
+
+async function headers(workspaceId: string, json = true): Promise<HeadersInit> {
   const value: Record<string, string> = {
-    'x-sag-service-token': process.env.SAG_VIDEO_SERVICE_TOKEN ?? 'local-chamber-service',
     'x-sag-workspace-id': workspaceId,
   };
+  if (process.env.NODE_ENV === 'production') {
+    identityClient ??= await new GoogleAuth().getIdTokenClient(baseUrl());
+    Object.assign(value, await identityClient.getRequestHeaders());
+  } else {
+    value['x-sag-service-token'] = process.env.SAG_VIDEO_SERVICE_TOKEN ?? 'local-chamber-service';
+  }
   if (json) value['content-type'] = 'application/json';
   return value;
 }
@@ -19,7 +27,7 @@ function headers(workspaceId: string, json = true): HeadersInit {
 async function engineFetch<T>(workspaceId: string, path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${baseUrl()}${path}`, {
     ...init,
-    headers: { ...headers(workspaceId, !(init.body instanceof FormData)), ...init.headers },
+    headers: { ...await headers(workspaceId, !(init.body instanceof FormData)), ...init.headers },
     cache: 'no-store',
   });
   const body = await response.json().catch(() => ({ detail: response.statusText }));
@@ -77,6 +85,9 @@ export const sagEngine = {
     method: 'POST', body: JSON.stringify({ project_revision: revision, request_id: requestId, actor: 'verbalogix-orchestrator' }),
   }),
   receipt: (workspaceId: string, receiptId: string) => engineFetch<Record<string, unknown>>(workspaceId, `/api/receipts/${receiptId}`),
+  artifact: (workspaceId: string, artifactId: string) => engineFetch<{
+    id: string; managed_uri: string; sha256: string; byte_size: number; mime_type: string | null; provenance: Record<string, unknown>;
+  }>(workspaceId, `/api/artifacts/${artifactId}`),
   cancel: (workspaceId: string, jobId: string) => engineFetch<EngineJob>(workspaceId, `/api/jobs/${jobId}/cancel`, { method: 'POST' }),
   command: (workspaceId: string, projectId: string, command: string, arguments_: Record<string, unknown>, expectedRevision: number, requestId: string) =>
     engineFetch<Record<string, unknown>>(workspaceId, `/api/projects/${projectId}/commands`, {

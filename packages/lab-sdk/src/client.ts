@@ -3,7 +3,6 @@ import type {
   Asset,
   RenderJob,
   PlatformVariant,
-  Platform,
   PresignedUpload,
 } from './types.js';
 
@@ -63,17 +62,10 @@ export class LabClient {
 
   // ── Pipeline ────────────────────────────────────────────────
 
-  async triggerAtomize(projectId: string, variants?: PlatformVariant[]): Promise<{ jobId: string }> {
-    return this.req(`/api/projects/${projectId}/atomize`, {
+  async startChamber(projectId: string, sourceAssetId: string, variants?: PlatformVariant[]): Promise<{ run: { id: string } }> {
+    return this.req(`/api/projects/${projectId}/chamber`, {
       method: 'POST',
-      body: { variants },
-    });
-  }
-
-  async publishRender(renderJobId: string, platforms: Platform[]): Promise<{ jobId: string }> {
-    return this.req(`/api/renders/${renderJobId}/publish`, {
-      method: 'POST',
-      body: { platforms },
+      body: { sourceAssetId, variants },
     });
   }
 

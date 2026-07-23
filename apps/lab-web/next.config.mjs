@@ -1,5 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'standalone',
+  serverExternalPackages: [
+    '@google-cloud/storage',
+    '@google-cloud/tasks',
+    'google-auth-library',
+    'googleapis',
+  ],
   reactStrictMode: true,
   experimental: {
     typedRoutes: true,

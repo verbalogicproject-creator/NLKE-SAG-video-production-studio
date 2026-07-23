@@ -1,0 +1,22 @@
+FROM node:22-bookworm-slim AS build
+RUN npm install --global pnpm@9.12.0
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY workers/cloud-jobs/package.json workers/cloud-jobs/package.json
+COPY apps/lab-web/package.json apps/lab-web/package.json
+COPY packages/lab-sdk/package.json packages/lab-sdk/package.json
+COPY packages/media-contracts/package.json packages/media-contracts/package.json
+RUN pnpm install --frozen-lockfile
+COPY workers/cloud-jobs workers/cloud-jobs
+COPY prisma prisma
+ENV DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build
+RUN pnpm --filter @verbalogix/web exec prisma generate --schema=../../prisma/schema.prisma \
+    && pnpm --filter @verbalogix/cloud-jobs build
+
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/workers/cloud-jobs/dist ./dist
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/workers/cloud-jobs/node_modules ./workers/cloud-jobs/node_modules
+CMD ["node", "dist/index.js"]

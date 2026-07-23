@@ -10,15 +10,16 @@ One upload produces distinct, editable drafts for YouTube Shorts, TikTok, and In
 Upload → Analyze → Drafts → Review/Edit → Render → Verify → Ready to publish
 ```
 
-Actual social publishing, cloud storage, long-form output, and Remotion rendering are intentionally outside this milestone.
+The production beta targets GCP and supports private YouTube publishing only. Long-form output, billing, Remotion, and other social publishers are intentionally unsupported.
 
 ## Layout
 
 - `apps/lab-web` — user-facing Next.js Chamber
 - `services/sag-engine` — FastAPI analysis/editor/render service
-- `workers/orchestrator` — pg-boss state synchronizer
+- `deploy/terraform` - GCP infrastructure and Cloud Run job definitions
 - `packages/media-contracts` — versioned cross-runtime contracts
-- `packages/lab-sdk` — REST/MCP SDK and EDL compatibility types
+- `packages/lab-sdk` - REST and MCP SDK types
+- `workers/cloud-jobs` - private YouTube publication worker
 - `prisma` — Verbalogix control-plane schema
 
 ## Termux development

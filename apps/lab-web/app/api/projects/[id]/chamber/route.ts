@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server';
-import { VerticalVariantSchema } from '@verbalogix/media-contracts';
+import { VerticalVariantSchema, type VerticalVariant } from '@verbalogix/media-contracts';
 import { db } from '@/lib/db';
 import { resolveBrandContract } from '@/lib/brand-contract';
 import { sagEngine } from '@/lib/engine';
 import { apiError, jsonSafe } from '@/lib/http';
-import { enqueue, Queues } from '@/lib/queue';
 import { requireWorkspace } from '@/lib/workspace';
 
 const DEFAULT_VARIANTS = ['YT_SHORTS_9_16', 'TIKTOK_9_16', 'IG_REELS_9_16'] as const;
@@ -16,9 +15,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const body = await request.json();
     const project = await db.project.findFirst({ where: { id, workspaceId } });
     if (!project?.engineProjectId) return NextResponse.json({ error: 'project_not_found' }, { status: 404 });
+    const workspace = await db.workspace.findUniqueOrThrow({ where: { id: workspaceId } });
+    const activeAnalysis = await db.chamberRun.count({
+      where: { project: { workspaceId }, status: { in: ['INGESTING', 'ANALYZING'] } },
+    });
+    if (activeAnalysis >= workspace.analysisConcurrencyLimit) {
+      return NextResponse.json({ error: 'analysis_concurrency_quota_exceeded' }, { status: 409 });
+    }
     const asset = await db.asset.findFirst({ where: { id: String(body.sourceAssetId), projectId: id, kind: 'RAW' } });
     if (!asset?.engineAssetId || !asset.sha256) return NextResponse.json({ error: 'source_asset_not_ready' }, { status: 422 });
-    const variants = (body.variants ?? DEFAULT_VARIANTS).map((value: unknown) => VerticalVariantSchema.parse(value));
+    const variants: VerticalVariant[] = (body.variants ?? DEFAULT_VARIANTS).map((value: unknown) => VerticalVariantSchema.parse(value));
     const engineProject = await sagEngine.project(workspaceId, project.engineProjectId);
     const brand = await resolveBrandContract(workspaceId);
     const job = await sagEngine.startAnalysis(workspaceId, {
@@ -49,7 +55,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       },
       include: { variants: true },
     });
-    await enqueue(Queues.CHAMBER_SYNC, { runId: run.id });
     return NextResponse.json(jsonSafe({ run, job }), { status: 202 });
   } catch (error) {
     return apiError(error);

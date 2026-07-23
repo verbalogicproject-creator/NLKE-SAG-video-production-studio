@@ -1,0 +1,25 @@
+{
+  "name": "@verbalogix/cloud-jobs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.21.0",
+    "@prisma/adapter-pg": "^7.9.0",
+    "@prisma/client": "^6.1.0",
+    "google-auth-library": "^10.9.0",
+    "googleapis": "^173.0.0",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.20.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

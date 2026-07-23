@@ -19,7 +19,7 @@ export function formatTimecode(ms: number): string {
 
 /** Short ETA: "0:42", "1:04", "12:38" */
 export function formatEta(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '—:—';
+  if (!Number.isFinite(ms) || ms < 0) return '--:--';
   const totalSec = Math.floor(ms / 1000);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;

@@ -1,0 +1,15 @@
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: sag-staging-images
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, deploy/Dockerfile.engine, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/engine:$COMMIT_SHA', .]
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, deploy/Dockerfile.web, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/web:$COMMIT_SHA', .]
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, deploy/Dockerfile.jobs, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/jobs:$COMMIT_SHA', .]
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/engine:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/web:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/jobs:$COMMIT_SHA'
+options: { logging: CLOUD_LOGGING_ONLY }

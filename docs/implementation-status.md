@@ -1,6 +1,31 @@
 # Implementation status
 
-Updated: July 22, 2026
+Updated: July 23, 2026
+
+## GCP beta control-plane foundation
+
+The repository now includes the production-facing control-plane foundation:
+
+- GCS resumable upload sessions with server-owned object keys, generation,
+  size, MIME, workspace, and quota verification.
+- Invite-only Google account admission, role-bound workspaces, hashed scoped
+  API keys, and authenticated Streamable HTTP MCP tools.
+- Canonical jobs, transactional outbox rows, duplicate-safe dispatcher claims,
+  Cloud Tasks OIDC dispatch, expired-lease reconciliation, and daily/concurrent
+  quotas.
+- Human-bound, single-use private YouTube approvals, KMS-encrypted OAuth tokens,
+  a resumable publisher with ambiguous-result reconciliation, and audit events.
+- Terraform for regional GCS, private Cloud SQL, Cloud Run services/jobs,
+  service accounts, KMS, Secret Manager, Artifact Registry, Cloud Tasks,
+  Scheduler, Monitoring, and optional billing budgets.
+- A focused Chamber edit surface for trims, hook titles, caption style and
+  position, crop framing, gain, mute, revision readback, render, and evidence.
+
+This is not yet an externally admissible beta. The Python SAG runtime still
+uses its SQLite/filesystem adapter, so the Cloud Run job definitions must not be
+enabled until the PostgreSQL SAG repository, GCS media/artifact adapter,
+one-shot canonical job runner, importer, and database migration drill are
+implemented and pass the cloud acceptance suite.
 
 ## Baseline
 

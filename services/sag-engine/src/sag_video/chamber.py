@@ -109,36 +109,3 @@ def validate_draft_plan(plan: DraftPlan, transcript_text: str, brand: BrandContr
             summary="Required platform disclosure is missing",
         ))
     return violations
-
-
-def draft_plan_to_edl(plan: DraftPlan, source_key: str, words: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compatibility export. DraftPlan remains the canonical pre-acceptance contract."""
-    selected = {word_id for scene in plan.scenes for word_id in scene.word_ids}
-    caption_words = [word for word in words if str(word.get("id")) in selected]
-    first_tick = min(scene.source_start_ticks for scene in plan.scenes)
-    return {
-        "version": "1.0.0",
-        "variant": plan.target_variant.value,
-        "sourceR2Key": source_key,
-        "hookSummary": plan.hook_title or plan.reason,
-        "scenes": [{
-            "sourceStartMs": round(scene.source_start_ticks / 120),
-            "sourceEndMs": round(scene.source_end_ticks / 120),
-            "speed": 1,
-            "transition": "cut",
-            "transitionDurationMs": 0,
-        } for scene in plan.scenes],
-        "captions": [{
-            "style": "karaoke",
-            "words": [{
-                "startMs": round((int(word["start_ticks"]) - first_tick) / 120),
-                "endMs": round((int(word["end_ticks"]) - first_tick) / 120),
-                "text": str(word["text"]),
-                "emphasis": "none",
-            } for word in caption_words],
-        }],
-        "audio": {"kind": "source", "gain": 1, "duckUnderSpeech": False},
-        "overlays": [],
-        "captionRegister": plan.caption_register,
-        "postCopy": {"description": plan.post_copy, "hashtags": plan.hashtags},
-    }

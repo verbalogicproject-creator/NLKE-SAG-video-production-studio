@@ -1,35 +1,190 @@
-// Verbalogix Lab — Prisma schema
-// Sprint 1: User, Workspace, Project, Asset, RenderJob, BrandSkill, PlatformConnection, PlatformPublication
-// Source: /storage/emulated/0/Download/claude-projects/custom/video-lab-implementation-plan.md §5
-
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
+  engineType = "client"
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  schemas  = ["control", "queue"]
 }
 
-// ─────────────────────────────────────────────────────────────
-// Identity
-// ─────────────────────────────────────────────────────────────
+enum Role {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+
+  @@schema("control")
+}
+
+enum ProjectStatus {
+  DRAFT
+  INGESTING
+  READY
+  ARCHIVED
+
+  @@schema("control")
+}
+
+enum AssetKind {
+  RAW
+  ANALYSIS
+  SCRATCH
+  DELIVERABLE
+
+  @@schema("control")
+}
+
+enum StorageProvider {
+  LOCAL
+  GCS
+
+  @@schema("control")
+}
+
+enum UploadStatus {
+  ISSUED
+  UPLOADED
+  VERIFYING
+  PROMOTED
+  REJECTED
+  EXPIRED
+
+  @@schema("control")
+}
+
+enum PlatformVariant {
+  YT_SHORTS_9_16
+  TIKTOK_9_16
+  IG_REELS_9_16
+
+  @@schema("control")
+}
+
+enum ChamberRunStatus {
+  INGESTING
+  ANALYZING
+  DRAFTS_READY
+  IN_REVIEW
+  RENDERING
+  VERIFYING
+  READY_TO_PUBLISH
+  FAILED
+  CANCELLED
+  HALTED_BRAND_VIOLATION
+
+  @@schema("control")
+}
+
+enum ChamberVariantStatus {
+  PENDING
+  DRAFT_READY
+  HALTED_BRAND_VIOLATION
+  ACCEPTED
+  RENDERING
+  VERIFYING
+  READY_TO_PUBLISH
+  FAILED
+  CANCELLED
+
+  @@schema("control")
+}
+
+enum CanonicalJobKind {
+  INTAKE
+  ANALYSIS
+  RENDER
+  OBSERVE
+  PUBLISH_YOUTUBE
+
+  @@schema("control")
+}
+
+enum CanonicalJobState {
+  QUEUED
+  DISPATCH_PENDING
+  CLAIMED
+  RUNNING
+  AWAITING_OBSERVATION
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  INTERRUPTED
+
+  @@schema("control")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+
+  @@schema("control")
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+
+  @@schema("control")
+}
+
+enum QuotaKind {
+  UPLOAD_BYTES
+  STORAGE_BYTES
+  ANALYSIS_CONCURRENCY
+  RENDER_CONCURRENCY
+  RENDER_DAILY
+
+  @@schema("control")
+}
+
+enum OutboxState {
+  PENDING
+  DISPATCHED
+  FAILED
+
+  @@schema("queue")
+}
+
+enum ApprovalState {
+  ACTIVE
+  CONSUMED
+  REVOKED
+  EXPIRED
+
+  @@schema("control")
+}
+
+enum PublicationState {
+  PENDING
+  UPLOADING
+  PUBLISHED
+  FAILED
+  AMBIGUOUS
+
+  @@schema("control")
+}
 
 model User {
-  id         String            @id @default(cuid())
-  email      String            @unique
+  id         String                @id @default(cuid())
+  email      String                @unique
   name       String?
   image      String?
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
   workspaces WorkspaceMember[]
   sessions   Session[]
   accounts   Account[]
+  apiKeys    ApiKey[]              @relation("ApiKeyCreator")
+  approvals  PublicationApproval[]
 
   @@index([email])
+  @@schema("control")
 }
 
-// Auth.js v4 models — standard NextAuth adapter shape.
 model Account {
   id                String  @id @default(cuid())
   userId            String
@@ -46,6 +201,7 @@ model Account {
   user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
+  @@schema("control")
 }
 
 model Session {
@@ -54,6 +210,8 @@ model Session {
   userId       String
   expires      DateTime
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@schema("control")
 }
 
 model VerificationToken {
@@ -62,295 +220,365 @@ model VerificationToken {
   expires    DateTime
 
   @@unique([identifier, token])
-}
-
-// ─────────────────────────────────────────────────────────────
-// Tenancy
-// ─────────────────────────────────────────────────────────────
-
-enum Plan {
-  FREE
-  STARTER
-  STUDIO
-  AGENCY
-}
-
-enum Role {
-  OWNER
-  ADMIN
-  EDITOR
-  VIEWER
+  @@schema("control")
 }
 
 model Workspace {
-  id               String                @id @default(cuid())
-  name             String
-  slug             String                @unique
-  stripeCustomerId String?               @unique
-  stripeSubId      String?               @unique
-  plan             Plan                  @default(FREE)
-  planRenewalAt    DateTime?
-  apiKeyHash       String?               @unique // SHA-256 of the SDK/MCP bearer token
-  createdAt        DateTime              @default(now())
-  updatedAt        DateTime              @updatedAt
+  id                       String   @id @default(cuid())
+  name                     String
+  slug                     String   @unique
+  uploadLimitBytes         BigInt   @default(536870912)
+  storageLimitBytes        BigInt   @default(5368709120)
+  analysisConcurrencyLimit Int      @default(1)
+  renderConcurrencyLimit   Int      @default(1)
+  dailyRenderLimit         Int      @default(20)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 
-  members      WorkspaceMember[]
-  projects     Project[]
-  brandSkill   BrandSkill?
-  connections  PlatformConnection[]
+  members             WorkspaceMember[]
+  projects            Project[]
+  brandSkill          BrandSkill?
+  invitations         Invitation[]
+  apiKeys             ApiKey[]
+  uploadSessions      UploadSession[]
+  jobs                CanonicalJob[]
+  quotaLedger         QuotaLedger[]
+  youtubeConnection   YouTubeConnection?
+  approvals           PublicationApproval[]
+  publicationAttempts PublicationAttempt[]
+  auditEvents         AuditEvent[]
 
   @@index([slug])
+  @@schema("control")
 }
 
 model WorkspaceMember {
   userId      String
   workspaceId String
-  role        Role       @default(EDITOR)
-  joinedAt    DateTime   @default(now())
-  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role        Role      @default(EDITOR)
+  joinedAt    DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@id([userId, workspaceId])
   @@index([workspaceId])
+  @@schema("control")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Projects & assets
-// ─────────────────────────────────────────────────────────────
+model Invitation {
+  id          String           @id @default(cuid())
+  workspaceId String
+  email       String
+  role        Role             @default(EDITOR)
+  status      InvitationStatus @default(PENDING)
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-enum ProjectStatus {
-  DRAFT
-  INGESTING
-  READY
-  ARCHIVED
+  @@unique([workspaceId, email])
+  @@index([email, status, expiresAt])
+  @@schema("control")
 }
 
-enum AssetKind {
-  RAW           // the original upload
-  TRANSCRIPT    // whisper JSON
-  SCENE_DATA    // PySceneDetect JSON
-  EDIT_DECISION // atomizer output
-  SCRATCH       // intermediate render scratch (short-lived)
-  DELIVERABLE   // final per-variant MP4
+model ApiKey {
+  id          String       @id @default(cuid())
+  workspaceId String
+  createdById String
+  name        String
+  prefix      String
+  keyHash     String       @unique
+  scopes      String[]
+  status      ApiKeyStatus @default(ACTIVE)
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  createdAt   DateTime     @default(now())
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User         @relation("ApiKeyCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, status])
+  @@schema("control")
 }
 
 model Project {
-  id          String        @id @default(cuid())
-  workspaceId String
-  name        String
-  status      ProjectStatus @default(DRAFT)
-  description String?       @db.Text
-  engineProjectId String?    @unique
+  id              String          @id @default(cuid())
+  workspaceId     String
+  name            String
+  status          ProjectStatus   @default(DRAFT)
+  description     String?         @db.Text
+  engineProjectId String?         @unique
   engineRevision  Int?
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-
-  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  assets    Asset[]
-  renders   RenderJob[]
-  chamberRuns ChamberRun[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assets          Asset[]
+  uploadSessions  UploadSession[]
+  chamberRuns     ChamberRun[]
+  jobs            CanonicalJob[]
 
   @@index([workspaceId, createdAt])
+  @@schema("control")
+}
+
+model StorageObject {
+  id         String          @id @default(cuid())
+  provider   StorageProvider
+  bucket     String?
+  objectKey  String
+  generation String?
+  sha256     String?
+  byteSize   BigInt?
+  createdAt  DateTime        @default(now())
+  asset      Asset?
+
+  @@unique([provider, bucket, objectKey, generation])
+  @@schema("control")
 }
 
 model Asset {
-  id         String    @id @default(cuid())
-  projectId  String
-  kind       AssetKind
-  r2Bucket   String    // masters or deliverables
-  r2Key      String
-  mimeType   String?
-  sizeBytes  BigInt
-  durationMs Int?
-  metadata   Json?     // transcript JSON, scene data, EDL, etc.
-  engineAssetId String? @unique
-  sha256      String?
-  createdAt  DateTime  @default(now())
-
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  id              String                @id @default(cuid())
+  projectId       String
+  storageObjectId String?               @unique
+  kind            AssetKind
+  managedUri      String                @unique
+  mimeType        String?
+  sizeBytes       BigInt
+  durationMs      Int?
+  metadata        Json?
+  engineAssetId   String?               @unique
+  sha256          String?
+  verifiedAt      DateTime?
+  createdAt       DateTime              @default(now())
+  project         Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  storageObject   StorageObject?        @relation(fields: [storageObjectId], references: [id], onDelete: Restrict)
+  approvals       PublicationApproval[]
 
   @@index([projectId, kind])
+  @@schema("control")
 }
 
-enum ChamberRunStatus {
-  INGESTING
-  ANALYZING
-  DRAFTS_READY
-  IN_REVIEW
-  RENDERING
-  VERIFYING
-  READY_TO_PUBLISH
-  FAILED
-  CANCELLED
-  HALTED_BRAND_VIOLATION
+model UploadSession {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  projectId         String
+  assetId           String       @unique
+  status            UploadStatus @default(ISSUED)
+  objectKey         String
+  originalFilename  String
+  expectedSizeBytes BigInt
+  expectedMimeType  String
+  objectGeneration  String?
+  checksumSha256    String?
+  expiresAt         DateTime
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  workspace         Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project           Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status, expiresAt])
+  @@schema("control")
 }
 
-enum ChamberVariantStatus {
-  PENDING
-  DRAFT_READY
-  HALTED_BRAND_VIOLATION
-  ACCEPTED
-  RENDERING
-  VERIFYING
-  READY_TO_PUBLISH
-  FAILED
-  CANCELLED
+model BrandSkill {
+  workspaceId String    @id
+  markdown    String    @db.Text
+  version     Int       @default(1)
+  updatedAt   DateTime  @updatedAt
+  updatedById String?
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@schema("control")
 }
 
 model ChamberRun {
-  id                    String           @id @default(cuid())
+  id                    String            @id @default(cuid())
   projectId             String
   engineProjectId       String
   sourceEngineAssetId   String
   sourceRevision        Int
   sourceSha256          String
   requestedVariants     PlatformVariant[]
-  language              String           @default("auto")
-  prompt                String?          @db.Text
+  language              String            @default("auto")
+  prompt                String?           @db.Text
   brandSkillVersion     Int
   brandContractHash     String
   brandContractSnapshot Json
-  analysisJobId         String?          @unique
-  status                ChamberRunStatus @default(INGESTING)
+  analysisJobId         String?           @unique
+  status                ChamberRunStatus  @default(INGESTING)
   errorCode             String?
-  errorDetail           String?          @db.Text
-  createdAt             DateTime         @default(now())
-  updatedAt             DateTime         @updatedAt
-
-  project  Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  variants ChamberVariant[]
+  errorDetail           String?           @db.Text
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  project               Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  variants              ChamberVariant[]
 
   @@index([projectId, createdAt])
   @@index([status, updatedAt])
+  @@schema("control")
 }
 
 model ChamberVariant {
-  id                    String               @id @default(cuid())
-  chamberRunId          String
-  variant               PlatformVariant
-  suggestionId          String?              @unique
-  engineProjectId       String?
-  engineRevision        Int?
-  renderJobId           String?              @unique
-  receiptId             String?              @unique
-  deliverableAssetId    String?
-  status                ChamberVariantStatus @default(PENDING)
-  warningDetails        Json?
-  createdAt             DateTime             @default(now())
-  updatedAt             DateTime             @updatedAt
-
-  chamberRun ChamberRun @relation(fields: [chamberRunId], references: [id], onDelete: Cascade)
+  id                 String               @id @default(cuid())
+  chamberRunId       String
+  variant            PlatformVariant
+  suggestionId       String?              @unique
+  engineProjectId    String?
+  engineRevision     Int?
+  renderJobId        String?              @unique
+  receiptId          String?              @unique
+  deliverableAssetId String?
+  status             ChamberVariantStatus @default(PENDING)
+  warningDetails     Json?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  chamberRun         ChamberRun           @relation(fields: [chamberRunId], references: [id], onDelete: Cascade)
 
   @@unique([chamberRunId, variant])
   @@index([chamberRunId, status])
+  @@schema("control")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Render pipeline
-// ─────────────────────────────────────────────────────────────
+model CanonicalJob {
+  id                String                @id @default(cuid())
+  workspaceId       String
+  projectId         String?
+  kind              CanonicalJobKind
+  state             CanonicalJobState     @default(QUEUED)
+  requestId         String
+  canonicalEntityId String
+  attempt           Int                   @default(0)
+  claimedBy         String?
+  claimedAt         DateTime?
+  leaseExpiresAt    DateTime?
+  errorCode         String?
+  errorDetail       String?               @db.Text
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project           Project?              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  outbox            OutboxEvent[]
+  observations      ArtifactObservation[]
 
-enum PlatformVariant {
-  LINKEDIN_16_9
-  YT_LONG_16_9
-  YT_SHORTS_9_16
-  TIKTOK_9_16
-  IG_REELS_9_16
-  FB_FEED_16_9
+  @@unique([workspaceId, requestId])
+  @@index([state, createdAt])
+  @@index([workspaceId, kind, state])
+  @@schema("control")
 }
 
-enum JobStatus {
-  QUEUED
-  RUNNING
-  COMPLETED
-  FAILED
-  HALTED_BRAND_VIOLATION
-  CANCELLED
+model OutboxEvent {
+  id           String       @id @default(cuid())
+  jobId        String
+  state        OutboxState  @default(PENDING)
+  attempt      Int          @default(0)
+  availableAt  DateTime     @default(now())
+  dispatchedAt DateTime?
+  lastError    String?      @db.Text
+  createdAt    DateTime     @default(now())
+  job          CanonicalJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([state, availableAt])
+  @@schema("queue")
 }
 
-model RenderJob {
-  id               String          @id @default(cuid())
-  projectId        String
-  variant          PlatformVariant
-  status           JobStatus       @default(QUEUED)
-  progress         Int             @default(0) // 0-100
-  editDecisionList Json?           // atomizer output for this variant
-  outputAssetId    String?         @unique
-  error            String?         @db.Text
-  attempt          Int             @default(0)
-  queuedAt         DateTime        @default(now())
-  startedAt        DateTime?
-  completedAt      DateTime?
+model QuotaLedger {
+  id          String    @id @default(cuid())
+  workspaceId String
+  kind        QuotaKind
+  amount      BigInt
+  requestId   String
+  occurredAt  DateTime  @default(now())
+  metadata    Json?
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  project       Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  publications  PlatformPublication[]
-
-  @@index([projectId, status])
-  @@index([status, queuedAt])
+  @@unique([workspaceId, kind, requestId])
+  @@index([workspaceId, kind, occurredAt])
+  @@schema("control")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Brand-consistency skill (runtime contract)
-// ─────────────────────────────────────────────────────────────
+model ArtifactObservation {
+  id             String       @id @default(cuid())
+  jobId          String
+  artifactSha256 String
+  passed         Boolean
+  evidence       Json
+  observedAt     DateTime     @default(now())
+  job            CanonicalJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
-model BrandSkill {
-  workspaceId String    @id
-  markdown    String    @db.Text  // the raw .skill.md content
-  version     Int       @default(1)
-  updatedAt   DateTime  @updatedAt
-  updatedById String?
-
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([jobId, observedAt])
+  @@schema("control")
 }
 
-// ─────────────────────────────────────────────────────────────
-// Platform publishing (DIY OAuth, encrypted tokens)
-// ─────────────────────────────────────────────────────────────
+model YouTubeConnection {
+  id                    String    @id @default(cuid())
+  workspaceId           String    @unique
+  channelId             String
+  channelTitle          String?
+  encryptedAccessToken  String    @db.Text
+  encryptedRefreshToken String?   @db.Text
+  expiresAt             DateTime?
+  scopes                String[]
+  kmsKeyVersion         String
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-enum Platform {
-  YOUTUBE
-  LINKEDIN
-  TIKTOK
-  INSTAGRAM
-  FACEBOOK
+  @@schema("control")
 }
 
-enum PublishStatus {
-  PENDING
-  PUBLISHED
-  FAILED
+model PublicationApproval {
+  id              String               @id @default(cuid())
+  workspaceId     String
+  artifactAssetId String
+  artifactSha256  String
+  channelId       String
+  visibility      String               @default("private")
+  state           ApprovalState        @default(ACTIVE)
+  approvedById    String
+  expiresAt       DateTime
+  consumedAt      DateTime?
+  createdAt       DateTime             @default(now())
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  artifact        Asset                @relation(fields: [artifactAssetId], references: [id], onDelete: Restrict)
+  approvedBy      User                 @relation(fields: [approvedById], references: [id], onDelete: Restrict)
+  attempts        PublicationAttempt[]
+
+  @@index([workspaceId, state, expiresAt])
+  @@schema("control")
 }
 
-model PlatformConnection {
-  id               String    @id @default(cuid())
+model PublicationAttempt {
+  id               String              @id @default(cuid())
   workspaceId      String
-  platform         Platform
-  handle           String?   // @verbalogix on the platform
-  accessTokenEnc   String    @db.Text    // AES-256-GCM ciphertext, base64
-  refreshTokenEnc  String?   @db.Text
-  expiresAt        DateTime?
-  scopeGranted     String[]  @default([])
-  lastRefreshAt    DateTime?
-  createdAt        DateTime  @default(now())
+  approvalId       String
+  idempotencyKey   String              @unique
+  state            PublicationState    @default(PENDING)
+  resumableSession String?             @db.Text
+  youtubeVideoId   String?
+  boundedError     String?             @db.Text
+  attempt          Int                 @default(0)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  workspace        Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  approval         PublicationApproval @relation(fields: [approvalId], references: [id], onDelete: Restrict)
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-
-  @@unique([workspaceId, platform])
-  @@index([workspaceId])
+  @@unique([approvalId, idempotencyKey])
+  @@index([workspaceId, state, updatedAt])
+  @@schema("control")
 }
 
-model PlatformPublication {
-  id              String         @id @default(cuid())
-  renderJobId     String
-  platform        Platform
-  platformPostId  String?        // the platform's own ID for the post
-  postUrl         String?
-  status          PublishStatus  @default(PENDING)
-  publishedAt     DateTime?
-  error           String?        @db.Text
-  metrics         Json?          // Sprint 3+: retention, views, CTR
+model AuditEvent {
+  id          String    @id @default(cuid())
+  workspaceId String
+  actorId     String?
+  action      String
+  targetType  String
+  targetId    String
+  requestId   String
+  evidence    Json?
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  renderJob RenderJob @relation(fields: [renderJobId], references: [id], onDelete: Cascade)
-
-  @@index([renderJobId])
-  @@index([platform, status])
+  @@unique([workspaceId, requestId, action])
+  @@index([workspaceId, createdAt])
+  @@schema("control")
 }

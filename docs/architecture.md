@@ -22,7 +22,7 @@ Every mutation supplies an expected revision and request ID. A stale actor
 cannot overwrite a newer GUI or terminal edit, and a retried request cannot
 apply twice.
 
-The SQLite implementation is normalized and migration-driven. Project heads,
+The embedded SQLite implementation is normalized and migration-driven. Project heads,
 revision headers, revisioned assets/tracks/items, semantic events, receipt
 transitions, and observation findings are queryable rows rather than serialized
 project/event blobs. One unit of work commits the revision, event, receipt, and
@@ -97,7 +97,25 @@ When a title exists, its declared plate color supplies a bounded safe-area
 predicate over a decoded frame. A production observer should add OCR, caption
 coverage, loudness, silence,
 black-frame, frozen-frame, and brand-template predicates while continuing to
-report uncertainty as failure or inconclusive—not success.
+report uncertainty as failure or inconclusive, never success.
+
+## GCP execution boundary
+
+The control plane writes a canonical job and queue outbox row in one PostgreSQL
+transaction. Reconciliation converts pending outbox rows into OIDC-authenticated
+Cloud Tasks calls. The private dispatcher atomically claims the canonical job
+before starting the allowlisted Cloud Run Job with only that job ID. Duplicate
+tasks therefore do not duplicate heavy work.
+
+Browser-facing media identities remain `sag-blob://` and `sag-artifact://`.
+Only server-side storage rows contain GCS bucket, key, and generation. A direct
+upload is promoted only after generation, byte size, MIME type, workspace, and
+quota checks. Intake still hashes and probes the bytes independently.
+
+Publishing is limited to YouTube private visibility. OAuth tokens are encrypted
+with workspace and channel bound KMS associated data. A publication job needs a
+verified artifact and a short-lived, single-use human approval bound to the
+artifact SHA, channel, and private visibility.
 
 ## Current receipt vocabulary
 

@@ -1,159 +1,33 @@
-/**
- * MCP tool registry for the Lab.
- *
- * The same handlers that back `/api/*` REST routes are wrapped here into
- * MCP tool definitions. Auth: the MCP server validates a workspace API key
- * (SHA-256 hash matched against Workspace.apiKeyHash), in contrast to the
- * session-cookie-backed REST surface.
- *
- * Stubs return 501-shaped errors until Sprint 1 handlers land.
- */
-
 export type McpTool = {
   name: string;
   description: string;
+  requiredScope: string;
   inputSchema: Record<string, unknown>;
 };
 
+const object = (properties: Record<string, unknown>, required: string[] = []) => ({
+  type: 'object', properties, required, additionalProperties: false,
+});
+
 export const LAB_MCP_TOOLS: McpTool[] = [
-  {
-    name: 'lab_list_projects',
-    description: 'List projects in the caller\'s workspace.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        status: {
-          type: 'string',
-          enum: ['DRAFT', 'INGESTING', 'READY', 'ARCHIVED'],
-          description: 'Optional status filter',
-        },
-        limit: { type: 'integer', default: 50, maximum: 200 },
-      },
-    },
-  },
-  {
-    name: 'lab_create_project',
-    description: 'Create a new project in the caller\'s workspace.',
-    inputSchema: {
-      type: 'object',
-      required: ['name'],
-      properties: {
-        name:        { type: 'string', minLength: 1, maxLength: 200 },
-        description: { type: 'string', maxLength: 2000 },
-      },
-    },
-  },
-  {
-    name: 'lab_get_project',
-    description: 'Fetch a project by id (with assets and renders).',
-    inputSchema: {
-      type: 'object',
-      required: ['projectId'],
-      properties: { projectId: { type: 'string' } },
-    },
-  },
-  {
-    name: 'lab_upload_asset',
-    description:
-      'Issue a presigned R2 PUT URL so the caller can upload a RAW asset directly. Returns the URL and the Asset id.',
-    inputSchema: {
-      type: 'object',
-      required: ['projectId', 'filename', 'contentType', 'sizeBytes'],
-      properties: {
-        projectId:   { type: 'string' },
-        filename:    { type: 'string' },
-        contentType: { type: 'string' },
-        sizeBytes:   { type: 'integer', minimum: 1 },
-      },
-    },
-  },
-  {
-    name: 'lab_trigger_atomize',
-    description:
-      'Trigger the transcript atomizer for a project that already has a transcribed RAW asset. Enqueues render jobs for the workspace\'s default platform variants.',
-    inputSchema: {
-      type: 'object',
-      required: ['projectId'],
-      properties: {
-        projectId: { type: 'string' },
-        variants: {
-          type: 'array',
-          items: {
-            type: 'string',
-            enum: [
-              'LINKEDIN_16_9',
-              'YT_LONG_16_9',
-              'YT_SHORTS_9_16',
-              'TIKTOK_9_16',
-              'IG_REELS_9_16',
-              'FB_FEED_16_9',
-            ],
-          },
-        },
-      },
-    },
-  },
-  {
-    name: 'lab_list_renders',
-    description: 'List render jobs for a project.',
-    inputSchema: {
-      type: 'object',
-      required: ['projectId'],
-      properties: { projectId: { type: 'string' } },
-    },
-  },
-  {
-    name: 'lab_publish_render',
-    description:
-      'Publish a completed render to one or more connected platforms. Fails if the workspace has not connected the platform or the render is not COMPLETED.',
-    inputSchema: {
-      type: 'object',
-      required: ['renderJobId', 'platforms'],
-      properties: {
-        renderJobId: { type: 'string' },
-        platforms: {
-          type: 'array',
-          items: {
-            type: 'string',
-            enum: ['YOUTUBE', 'LINKEDIN', 'TIKTOK', 'INSTAGRAM', 'FACEBOOK'],
-          },
-          minItems: 1,
-        },
-      },
-    },
-  },
-  {
-    name: 'lab_get_brand_skill',
-    description: 'Read the workspace\'s brand.skill.md markdown contents.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'lab_update_brand_skill',
-    description:
-      'Replace the workspace\'s brand.skill.md contents. Bumps the version counter.',
-    inputSchema: {
-      type: 'object',
-      required: ['markdown'],
-      properties: { markdown: { type: 'string', maxLength: 100_000 } },
-    },
-  },
+  { name: 'projects.list', description: 'List projects in the authenticated workspace.', requiredScope: 'projects:read', inputSchema: object({}) },
+  { name: 'drafts.review', description: 'Review the three platform drafts and their source evidence.', requiredScope: 'drafts:read', inputSchema: object({ runId: { type: 'string' } }, ['runId']) },
+  { name: 'project.get', description: 'Read the canonical SAG project and exact revision for an accepted draft.', requiredScope: 'drafts:read', inputSchema: object({ runId: { type: 'string' }, variant: { type: 'string', enum: ['YT_SHORTS_9_16', 'TIKTOK_9_16', 'IG_REELS_9_16'] } }, ['runId', 'variant']) },
+  { name: 'focused_edit.apply', description: 'Apply one revision-checked trim, title, caption, crop, gain, or mute edit.', requiredScope: 'edits:write', inputSchema: object({ runId: { type: 'string' }, variant: { type: 'string' }, command: { type: 'string' }, arguments: { type: 'object' }, expectedRevision: { type: 'integer', minimum: 1 }, requestId: { type: 'string' } }, ['runId', 'variant', 'command', 'arguments', 'expectedRevision', 'requestId']) },
+  { name: 'render.start', description: 'Render one exact accepted draft revision.', requiredScope: 'renders:write', inputSchema: object({ runId: { type: 'string' }, variant: { type: 'string' }, projectRevision: { type: 'integer', minimum: 1 }, requestId: { type: 'string' } }, ['runId', 'variant', 'projectRevision', 'requestId']) },
+  { name: 'evidence.get', description: 'Read a causal render or edit receipt with observation evidence.', requiredScope: 'evidence:read', inputSchema: object({ receiptId: { type: 'string' }, runId: { type: 'string' } }, ['receiptId', 'runId']) },
+  { name: 'approvals.list', description: 'List publication approvals. Agents cannot create approvals.', requiredScope: 'approvals:read', inputSchema: object({}) },
+  { name: 'download.create', description: 'Create a short-lived download for a verified deliverable.', requiredScope: 'downloads:read', inputSchema: object({ artifactAssetId: { type: 'string' } }, ['artifactAssetId']) },
+  { name: 'youtube.publish_private', description: 'Publish one verified artifact using an existing single-use human approval.', requiredScope: 'youtube:publish', inputSchema: object({ approvalId: { type: 'string' } }, ['approvalId']) },
 ];
 
 export function buildMcpManifest(baseUrl: string) {
   return {
-    name: 'verbalogix-lab',
-    version: '0.1.0',
-    description: 'Verbalogix Lab — Claude-operated video editing. REST + MCP.',
-    contact: {
-      url: 'https://lab.verbalogix.com',
-      email: 'support@verbalogix.com',
-    },
+    name: 'sag-video-chamber',
+    version: '1.0.0',
     serverUrl: `${baseUrl}/api/mcp`,
-    auth: {
-      type: 'bearer',
-      description:
-        'Workspace API key. Generate in Lab UI → Settings → API Keys. Sent as Authorization: Bearer <key>.',
-    },
-    tools: LAB_MCP_TOOLS,
+    transport: 'streamable-http',
+    auth: { type: 'bearer', description: 'Workspace-scoped API key' },
+    tools: LAB_MCP_TOOLS.map(({ requiredScope: _requiredScope, ...tool }) => tool),
   };
 }

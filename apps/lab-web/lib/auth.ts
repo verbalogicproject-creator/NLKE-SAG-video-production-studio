@@ -44,6 +44,28 @@ export const authOptions: NextAuthOptions = {
       }
     : undefined,
   callbacks: {
+    async signIn({ user, account, profile }) {
+      if (account?.provider !== 'google' || !user.email || !user.id) return false;
+      if ((profile as { email_verified?: boolean } | undefined)?.email_verified === false) return false;
+      const email = user.email.trim().toLowerCase();
+      const existing = await db.workspaceMember.findFirst({ where: { userId: user.id } });
+      if (existing) return true;
+      const invitation = await db.invitation.findFirst({
+        where: { email, status: 'PENDING', expiresAt: { gt: new Date() } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (!invitation) return false;
+      await db.$transaction([
+        db.user.update({ where: { id: user.id }, data: { email } }),
+        db.workspaceMember.upsert({
+          where: { userId_workspaceId: { userId: user.id, workspaceId: invitation.workspaceId } },
+          update: { role: invitation.role },
+          create: { userId: user.id, workspaceId: invitation.workspaceId, role: invitation.role },
+        }),
+        db.invitation.update({ where: { id: invitation.id }, data: { status: 'ACCEPTED', acceptedAt: new Date() } }),
+      ]);
+      return true;
+    },
     async session({ session, user }) {
       if (session.user && user?.id) {
         (session.user as { id?: string }).id = user.id;

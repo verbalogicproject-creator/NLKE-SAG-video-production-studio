@@ -154,7 +154,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.middleware("http")
     async def invite_gate(request: Request, call_next):
         service_header = request.headers.get("x-sag-service-token", "")
-        if settings.service_token and hmac.compare_digest(service_header, settings.service_token):
+        cloud_run_iam = (
+            os.getenv("SAG_TRUST_CLOUD_RUN_IAM", "0").lower() in {"1", "true", "yes"}
+            and request.headers.get("authorization", "").startswith("Bearer ")
+        )
+        if (settings.service_token and hmac.compare_digest(service_header, settings.service_token)) or cloud_run_iam:
             workspace_id = request.headers.get("x-sag-workspace-id", "").strip()
             if not workspace_id:
                 return JSONResponse({"detail": "x-sag-workspace-id is required", "code": "workspace_required"}, status_code=400)
@@ -524,6 +528,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job.state in {"observed_success", "observed_failure", "execution_failed", "cancelled", "timeout", "interrupted"}:
             return asdict(job)
         return asdict(store.request_job_cancellation(job_id))
+
+    @application.get("/api/artifacts/{artifact_id}")
+    def get_render_artifact_metadata(artifact_id: str, http_request: Request) -> dict:
+        try:
+            artifact = store.get_artifact(artifact_id)
+        except KeyError as error:
+            raise HTTPException(404, "render artifact not found") from error
+        _require_workspace(http_request, artifact.project_id)
+        return asdict(artifact)
 
     @application.get("/api/artifacts/{artifact_id}/content")
     def get_render_artifact(artifact_id: str, http_request: Request) -> FileResponse:

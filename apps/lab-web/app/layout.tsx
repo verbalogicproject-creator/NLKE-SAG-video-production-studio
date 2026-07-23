@@ -3,13 +3,13 @@ import '@/styles/globals.css';
 
 export const metadata: Metadata = {
   title: {
-    default: 'VERBALOGIX · LAB',
-    template: '%s · VERBALOGIX LAB',
+    default: 'SAG Video Chamber',
+    template: '%s | SAG Video Chamber',
   },
-  description: 'Claude-operated video editing lab. One upload, every platform.',
+  description: 'Create, refine, and independently verify three platform-specific vertical video drafts.',
   metadataBase: new URL('https://lab.verbalogix.com'),
   robots: {
-    index: false, // closed beta — do not index
+    index: false,
     follow: false,
   },
 };
