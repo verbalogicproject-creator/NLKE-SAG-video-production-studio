@@ -1,0 +1,36 @@
+{
+  "name": "verbalogix-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Verbalogix Chamber: an agent-native, verified short-video production monorepo.",
+  "packageManager": "pnpm@9.12.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "workers/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "dev:web": "pnpm --filter @verbalogix/web dev",
+    "dev:worker": "pnpm --filter @verbalogix/orchestrator dev",
+    "dev:engine": "make engine-dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "db:generate": "pnpm --filter @verbalogix/web exec prisma generate --schema=../../prisma/schema.prisma",
+    "db:migrate": "pnpm --filter @verbalogix/web exec prisma migrate dev --schema=../../prisma/schema.prisma",
+    "db:studio": "pnpm --filter @verbalogix/web exec prisma studio --schema=../../prisma/schema.prisma",
+    "contracts": "make contracts",
+    "test:engine": "make engine-test",
+    "preflight": "sh scripts/termux-preflight.sh"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.2",
+    "prettier": "^3.4.2"
+  }
+}

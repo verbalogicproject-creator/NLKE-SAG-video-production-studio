@@ -1,0 +1,166 @@
+{
+  "$defs": {
+    "BrandContract": {
+      "properties": {
+        "background_color": {
+          "default": "#000000B8",
+          "title": "Background Color",
+          "type": "string"
+        },
+        "caption_preset": {
+          "default": "bold_pop",
+          "enum": [
+            "bold_pop",
+            "clean",
+            "minimal"
+          ],
+          "title": "Caption Preset",
+          "type": "string"
+        },
+        "contract_hash": {
+          "default": "",
+          "title": "Contract Hash",
+          "type": "string"
+        },
+        "font_family": {
+          "default": "Noto Sans",
+          "title": "Font Family",
+          "type": "string"
+        },
+        "forbidden_phrases": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Forbidden Phrases",
+          "type": "array"
+        },
+        "highlight_color": {
+          "default": "#F8E71C",
+          "title": "Highlight Color",
+          "type": "string"
+        },
+        "palette": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Palette",
+          "type": "array"
+        },
+        "required_disclosures": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Required Disclosures",
+          "type": "object"
+        },
+        "text_color": {
+          "default": "#FFFFFF",
+          "title": "Text Color",
+          "type": "string"
+        },
+        "version": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "title": "BrandContract",
+      "type": "object"
+    },
+    "PlatformVariant": {
+      "enum": [
+        "YT_SHORTS_9_16",
+        "TIKTOK_9_16",
+        "IG_REELS_9_16"
+      ],
+      "title": "PlatformVariant",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "aspect_ratio": {
+      "const": "9:16",
+      "default": "9:16",
+      "title": "Aspect Ratio",
+      "type": "string"
+    },
+    "asset_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Asset Id"
+    },
+    "brand_contract": {
+      "$ref": "#/$defs/BrandContract"
+    },
+    "candidate_count": {
+      "default": 5,
+      "maximum": 10,
+      "minimum": 1,
+      "title": "Candidate Count",
+      "type": "integer"
+    },
+    "language": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "en",
+        "he"
+      ],
+      "title": "Language",
+      "type": "string"
+    },
+    "max_duration_ticks": {
+      "default": 10800000,
+      "maximum": 10800000,
+      "minimum": 1800000,
+      "title": "Max Duration Ticks",
+      "type": "integer"
+    },
+    "min_duration_ticks": {
+      "default": 1800000,
+      "maximum": 10800000,
+      "minimum": 1800000,
+      "title": "Min Duration Ticks",
+      "type": "integer"
+    },
+    "prompt": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Prompt"
+    },
+    "source_revision": {
+      "minimum": 1,
+      "title": "Source Revision",
+      "type": "integer"
+    },
+    "target_variants": {
+      "items": {
+        "$ref": "#/$defs/PlatformVariant"
+      },
+      "maxItems": 3,
+      "title": "Target Variants",
+      "type": "array"
+    }
+  },
+  "required": [
+    "source_revision"
+  ],
+  "title": "ShortsGenerateRequest",
+  "type": "object"
+}

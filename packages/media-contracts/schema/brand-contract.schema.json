@@ -1,0 +1,68 @@
+{
+  "properties": {
+    "background_color": {
+      "default": "#000000B8",
+      "title": "Background Color",
+      "type": "string"
+    },
+    "caption_preset": {
+      "default": "bold_pop",
+      "enum": [
+        "bold_pop",
+        "clean",
+        "minimal"
+      ],
+      "title": "Caption Preset",
+      "type": "string"
+    },
+    "contract_hash": {
+      "default": "",
+      "title": "Contract Hash",
+      "type": "string"
+    },
+    "font_family": {
+      "default": "Noto Sans",
+      "title": "Font Family",
+      "type": "string"
+    },
+    "forbidden_phrases": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Forbidden Phrases",
+      "type": "array"
+    },
+    "highlight_color": {
+      "default": "#F8E71C",
+      "title": "Highlight Color",
+      "type": "string"
+    },
+    "palette": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Palette",
+      "type": "array"
+    },
+    "required_disclosures": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Required Disclosures",
+      "type": "object"
+    },
+    "text_color": {
+      "default": "#FFFFFF",
+      "title": "Text Color",
+      "type": "string"
+    },
+    "version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "title": "BrandContract",
+  "type": "object"
+}

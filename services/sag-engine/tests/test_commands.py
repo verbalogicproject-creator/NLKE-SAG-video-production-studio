@@ -1,0 +1,81 @@
+from conftest import command_body
+
+
+def test_fixture_exposes_stable_semantic_selection(client):
+    payload = client.get("/api/projects/demo").json()
+    assert payload["project"]["revision"] == 1
+    assert payload["selection"] == ["title_intro"]
+    context = client.get("/api/projects/demo/context").json()
+    assert context["selection"][0]["id"] == "title_intro"
+    assert context["authority"]["context_grants_authority"] is False
+
+
+def test_command_is_idempotent_and_revision_checked(client):
+    body = command_body(
+        "timeline.set_title_transform",
+        {"item_id": "title_intro", "x": 60, "y": 56},
+    )
+    first = client.post("/api/projects/demo/commands", json=body)
+    assert first.status_code == 200
+    assert first.json()["project_revision"] == 2
+
+    repeated = client.post("/api/projects/demo/commands", json=body)
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == first.json()["id"]
+    assert client.get("/api/projects/demo").json()["project"]["revision"] == 2
+
+    stale = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.set_title_transform",
+            {"item_id": "title_intro", "x": 80, "y": 56},
+            request_id="test-request-stale",
+        ),
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "stale_revision"
+    assert stale.json()["current_revision"] == 2
+
+
+def test_unknown_command_fails_closed(client):
+    response = client.post(
+        "/api/projects/demo/commands",
+        json=command_body("timeline.run_ffmpeg", {"shell": "anything"}),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "denied"
+    assert response.json()["payload"]["reason"] == "unknown or undeclared command"
+
+
+def test_undo_creates_compensating_revision(client):
+    moved = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.set_title_transform",
+            {"item_id": "title_intro", "x": 80, "y": 70},
+        ),
+    )
+    assert moved.json()["project_revision"] == 2
+    undone = client.post(
+        "/api/projects/demo/commands",
+        json=command_body("project.undo", {}, revision=2, request_id="test-request-undo"),
+    )
+    assert undone.json()["project_revision"] == 3
+    project = client.get("/api/projects/demo").json()["project"]
+    title = next(item for track in project["tracks"] for item in track["items"] if item["id"] == "title_intro")
+    assert title["x"] == -22
+    assert project["revision"] == 3
+
+
+def test_edit_receipt_discloses_non_independent_readback(client):
+    response = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.set_title_transform",
+            {"item_id": "title_intro", "x": 60, "y": 56},
+        ),
+    )
+    observation = response.json()["payload"]["observation"]
+    assert observation["kind"] == "canonical_revision_readback"
+    assert observation["independent_failure_domain"] is False
+

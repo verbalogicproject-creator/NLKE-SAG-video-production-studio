@@ -1,0 +1,67 @@
+services:
+  control:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      SAG_VIDEO_INVITE_TOKEN: ${SAG_VIDEO_INVITE_TOKEN:?set SAG_VIDEO_INVITE_TOKEN}
+      SAG_VIDEO_OBSERVER_URL: http://observer:8081
+      SAG_VIDEO_OBSERVER_MODE: separate_service
+      SAG_VIDEO_START_ANALYSIS_WORKER: "0"
+      SAG_VIDEO_MEDIA_DIR: /media
+      SAG_VIDEO_PROXY_DIR: /proxies
+      SAG_VIDEO_WHISPER_MODEL: ${SAG_VIDEO_WHISPER_MODEL:-}
+      SAG_VIDEO_TRANSCRIPTION_BASE_URL: ${SAG_VIDEO_TRANSCRIPTION_BASE_URL:-}
+      SAG_VIDEO_TRANSCRIPTION_API_KEY: ${SAG_VIDEO_TRANSCRIPTION_API_KEY:-}
+      SAG_VIDEO_TRANSCRIPTION_MODEL: ${SAG_VIDEO_TRANSCRIPTION_MODEL:-whisper-1}
+      SAG_VIDEO_RANKING_BASE_URL: ${SAG_VIDEO_RANKING_BASE_URL:-}
+      SAG_VIDEO_RANKING_API_KEY: ${SAG_VIDEO_RANKING_API_KEY:-}
+      SAG_VIDEO_RANKING_MODEL: ${SAG_VIDEO_RANKING_MODEL:-}
+    volumes:
+      - database:/data
+      - artifacts:/artifacts
+      - media:/media
+      - proxies:/proxies
+    depends_on:
+      - observer
+
+  analysis:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: sag-video-analysis-worker
+    environment:
+      SAG_VIDEO_DATABASE_PATH: /data/sag-video.db
+      SAG_VIDEO_MEDIA_DIR: /media
+      SAG_VIDEO_PROXY_DIR: /proxies
+      SAG_VIDEO_WHISPER_MODEL: ${SAG_VIDEO_WHISPER_MODEL:-}
+      SAG_VIDEO_TRANSCRIPTION_BASE_URL: ${SAG_VIDEO_TRANSCRIPTION_BASE_URL:-}
+      SAG_VIDEO_TRANSCRIPTION_API_KEY: ${SAG_VIDEO_TRANSCRIPTION_API_KEY:-}
+      SAG_VIDEO_TRANSCRIPTION_MODEL: ${SAG_VIDEO_TRANSCRIPTION_MODEL:-whisper-1}
+      SAG_VIDEO_RANKING_BASE_URL: ${SAG_VIDEO_RANKING_BASE_URL:-}
+      SAG_VIDEO_RANKING_API_KEY: ${SAG_VIDEO_RANKING_API_KEY:-}
+      SAG_VIDEO_RANKING_MODEL: ${SAG_VIDEO_RANKING_MODEL:-}
+    volumes:
+      - database:/data
+      - media:/media
+      - proxies:/proxies
+    depends_on:
+      - control
+
+  observer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: uvicorn sag_video.observer_app:app --host 0.0.0.0 --port 8081
+    environment:
+      SAG_VIDEO_ARTIFACT_DIR: /artifacts
+    volumes:
+      - artifacts:/artifacts:ro
+
+volumes:
+  database:
+  artifacts:
+  media:
+  proxies:

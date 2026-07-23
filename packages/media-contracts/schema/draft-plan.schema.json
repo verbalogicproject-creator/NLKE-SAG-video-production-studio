@@ -1,0 +1,168 @@
+{
+  "$defs": {
+    "DraftScene": {
+      "properties": {
+        "source_end_ticks": {
+          "exclusiveMinimum": 0,
+          "title": "Source End Ticks",
+          "type": "integer"
+        },
+        "source_start_ticks": {
+          "minimum": 0,
+          "title": "Source Start Ticks",
+          "type": "integer"
+        },
+        "word_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Word Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_start_ticks",
+        "source_end_ticks",
+        "word_ids"
+      ],
+      "title": "DraftScene",
+      "type": "object"
+    },
+    "PlatformVariant": {
+      "enum": [
+        "YT_SHORTS_9_16",
+        "TIKTOK_9_16",
+        "IG_REELS_9_16"
+      ],
+      "title": "PlatformVariant",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "brand_hash": {
+      "title": "Brand Hash",
+      "type": "string"
+    },
+    "brand_version": {
+      "minimum": 1,
+      "title": "Brand Version",
+      "type": "integer"
+    },
+    "caption_register": {
+      "default": "hook-first",
+      "enum": [
+        "casual",
+        "hook-first",
+        "polished"
+      ],
+      "title": "Caption Register",
+      "type": "string"
+    },
+    "contract_version": {
+      "const": "chamber-draft-1.0",
+      "default": "chamber-draft-1.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "hashtags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Hashtags",
+      "type": "array"
+    },
+    "hook_title": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hook Title"
+    },
+    "post_copy": {
+      "default": "",
+      "maxLength": 5000,
+      "title": "Post Copy",
+      "type": "string"
+    },
+    "provider": {
+      "additionalProperties": true,
+      "title": "Provider",
+      "type": "object"
+    },
+    "reason": {
+      "maxLength": 500,
+      "title": "Reason",
+      "type": "string"
+    },
+    "scenes": {
+      "items": {
+        "$ref": "#/$defs/DraftScene"
+      },
+      "minItems": 1,
+      "title": "Scenes",
+      "type": "array"
+    },
+    "score": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Score",
+      "type": "number"
+    },
+    "score_components": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Score Components",
+      "type": "object"
+    },
+    "source_asset_id": {
+      "title": "Source Asset Id",
+      "type": "string"
+    },
+    "source_project_id": {
+      "title": "Source Project Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "minimum": 1,
+      "title": "Source Revision",
+      "type": "integer"
+    },
+    "source_sha256": {
+      "minLength": 16,
+      "title": "Source Sha256",
+      "type": "string"
+    },
+    "target_variant": {
+      "$ref": "#/$defs/PlatformVariant"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "target_variant",
+    "source_project_id",
+    "source_revision",
+    "source_asset_id",
+    "source_sha256",
+    "scenes",
+    "score",
+    "reason",
+    "brand_version",
+    "brand_hash"
+  ],
+  "title": "DraftPlan",
+  "type": "object"
+}

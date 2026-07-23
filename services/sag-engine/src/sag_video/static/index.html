@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#141618" />
+  <title>SAG Video - observed production</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/mobile.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="mark">S</span><span>SAG Video</span><small>Editor</small></div>
+    <div class="project-title">
+      <div class="project-switcher"><select id="project-picker" aria-label="Current project"></select><button id="new-project" aria-label="Create project">New</button></div>
+      <strong id="project-name">Loading project…</strong><span id="revision">Revision -</span>
+    </div>
+    <div class="actions">
+      <button class="ghost" id="pair">Pair</button>
+      <button class="ghost" id="reset">Reset</button>
+      <button class="ghost" id="create-shorts">Create Shorts</button>
+      <button class="primary" id="render">Render</button>
+    </div>
+  </header>
+
+  <nav class="mobile-nav" aria-label="Editor sections">
+    <button class="active" aria-current="true" data-pane="media-panel">Media</button><button data-pane="stage">Monitor</button><button data-pane="timeline">Timeline</button><button data-pane="inspector">Inspector</button>
+  </nav>
+
+  <main class="workspace">
+    <aside class="media-panel panel">
+      <div class="panel-heading"><span>Media</span><button id="import-media" aria-label="Import media">＋</button></div>
+      <input id="media-file" class="visually-hidden" type="file" accept="video/*,audio/*,.mkv,.webm,.m4a,.opus" />
+      <div class="media-grid" id="media-grid"></div>
+      <div class="semantic-card">
+        <span class="context-label">Selected item</span>
+        <strong id="selection-name">Nothing selected</strong>
+        <code id="selection-id">No stable ID</code>
+        <p>Selection supplies identity and context. It does not grant authority.</p>
+      </div>
+    </aside>
+
+    <section class="stage panel">
+      <div class="stage-heading">
+        <span>Program monitor</span>
+        <span class="resolution" id="resolution">960 × 540 · 30 fps</span>
+      </div>
+      <div class="monitor-shell">
+        <div class="monitor" id="monitor">
+          <video id="preview-video" playsinline preload="metadata"></video>
+          <video id="result-video" playsinline controls preload="metadata" hidden></video>
+          <div class="monitor-empty" id="monitor-empty">Insert or select an observed video asset</div>
+          <div class="monitor-grid"></div>
+          <div class="title-card" id="preview-title"><span></span></div>
+          <div class="caption-preview" id="caption-preview" dir="auto" hidden></div>
+          <div class="transform-box" id="transform-box" hidden><button class="rotate-handle" id="rotate-handle" type="button" aria-label="Rotate selected clip"></button><button class="resize-handle" id="resize-handle" type="button" aria-label="Resize selected clip"></button></div>
+          <div class="safe-area"><span>title safe</span></div>
+        </div>
+      </div>
+      <div class="transport"><button id="jump-start" aria-label="Jump to clip start">◀</button><button class="play" id="play" aria-label="Play or pause">▶</button><span id="playhead-time">00:00.0</span><input class="transport-line" id="playhead" type="range" min="0" max="1" value="0" step="1" /><span id="duration">00:06.0</span></div>
+      <div class="render-dock" id="render-dock" hidden><span><strong id="render-state">Queued</strong><small id="render-detail">Waiting for the local renderer</small></span><progress id="render-progress" max="1" value="0"></progress><button id="cancel-render">Cancel</button></div>
+    </section>
+
+    <aside class="inspector panel">
+      <div class="panel-heading"><span>Inspector</span><span class="revision-status">Canonical</span></div>
+      <div id="inspector-empty" class="empty">Select a timeline item to inspect its semantic properties.</div>
+      <form id="title-form" hidden>
+        <label>Title text<input id="field-text" maxlength="500" /></label>
+        <div class="field-row"><label>X<input id="field-x" type="number" /></label><label>Y<input id="field-y" type="number" /></label></div>
+        <div class="field-row"><label>Width<input id="field-width" type="number" /></label><label>Height<input id="field-height" type="number" /></label></div>
+        <button class="primary full" type="submit">Apply title</button>
+        <p class="microcopy">Creates a revision through the declared command boundary.</p>
+      </form>
+      <form id="clip-form" hidden>
+        <label>Timeline start (ticks)<input id="field-start" type="number" min="0" /></label>
+        <label>Duration (ticks)<input id="field-duration" type="number" /></label>
+        <label>Source in (ticks)<input id="field-source-in" type="number" min="0" /></label>
+        <label id="fit-label">Fit mode<select id="field-fit"><option value="fit">Fit</option><option value="fill">Fill</option><option value="stretch">Stretch</option></select></label>
+        <div id="visual-fields"><div class="field-row"><label>X<input id="field-clip-x" type="number" /></label><label>Y<input id="field-clip-y" type="number" /></label></div><div class="field-row"><label>Scale<input id="field-scale" type="number" min="0.05" max="20" step="0.05" /></label><label>Rotation<input id="field-rotation" type="number" min="-360" max="360" step="1" /></label></div><label>Opacity<input id="field-opacity" type="number" min="0" max="1" step="0.05" /></label></div>
+        <div id="crop-fields" hidden><span class="context-label">Manual crop correction</span><div class="field-row"><label>Center X<input id="field-crop-x" type="number" min="0" max="1" step="0.01" /></label><label>Center Y<input id="field-crop-y" type="number" min="0" max="1" step="0.01" /></label></div></div>
+        <div class="field-row"><label>Gain dB<input id="field-gain" type="number" min="-60" max="24" step="0.5" /></label><label class="check-label">Muted<input id="field-muted" type="checkbox" /></label></div>
+        <button class="primary full" type="submit">Apply settings</button>
+      </form>
+      <form id="caption-form" hidden>
+        <label>Caption text<textarea id="field-caption-text" dir="auto"></textarea></label>
+        <div class="field-row"><label>Preset<select id="field-caption-preset"><option value="bold_pop">Bold pop</option><option value="clean">Clean</option><option value="minimal">Minimal</option></select></label><label>Position<select id="field-caption-position"><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></label></div>
+        <div class="field-row"><label>Font size<input id="field-caption-size" type="number" min="16" max="160" /></label><label>Words/cue<input id="field-caption-words" type="number" min="1" max="12" /></label></div>
+        <label>Font family<input id="field-caption-font" maxlength="120" /></label>
+        <div class="field-row"><label>Text color<input id="field-caption-color" type="color" /></label><label>Highlight<input id="field-caption-highlight" type="color" /></label></div>
+        <label>Background color<input id="field-caption-background" type="color" /></label>
+        <button class="primary full" type="submit">Apply captions</button>
+      </form>
+      <div class="receipt-panel">
+        <div class="panel-heading"><span>Receipts</span><span id="receipt-count">0</span></div>
+        <div id="receipts" class="receipts"></div>
+      </div>
+    </aside>
+
+    <section class="timeline panel">
+      <div class="timeline-tools"><button id="undo" aria-label="Undo">↶ Undo</button><button id="split" aria-label="Split selected clip">Split</button><button id="delete-item" class="danger" aria-label="Delete selected item">Delete</button><span></span><button id="zoom-out" aria-label="Zoom out">−</button><input id="zoom" aria-label="Timeline zoom" type="range" min="1" max="10" value="5" /><button id="zoom-in" aria-label="Zoom in">＋</button><small>120k ticks/s</small></div>
+      <div class="ruler"><span>00:00</span><span>00:01</span><span>00:02</span><span>00:03</span><span>00:04</span><span>00:05</span><span>00:06</span></div>
+      <div id="tracks"></div>
+    </section>
+  </main>
+
+  <dialog id="pair-dialog">
+    <button class="dialog-close" id="close-dialog">×</button>
+    <span class="dialog-kicker">Terminal access</span>
+    <h2>Pair Codex or Claude Code</h2>
+    <p>This single-use code expires in ten minutes. The panel stays open until you close it.</p>
+    <div class="pair-status" id="pair-status" role="status" aria-live="polite">Waiting for a terminal</div>
+    <strong class="pair-code" id="pair-code">······</strong>
+    <div class="pair-command">
+      <code id="pair-command">SAG_VIDEO_URL=<span id="pair-url"></span> PYTHONPATH=src python -m sag_video.cli pair <span id="pair-code-command"></span> --actor codex --save-token .sag-video/codex-token</code>
+      <button class="primary full" id="copy-pair-command" type="button">Copy command</button>
+    </div>
+  </dialog>
+
+  <dialog id="shorts-dialog" class="shorts-dialog">
+    <button class="dialog-close" id="close-shorts">×</button>
+    <span class="dialog-kicker">Automatic clip discovery</span>
+    <h2>Create ranked shorts</h2>
+    <form id="shorts-form" class="shorts-form">
+      <label>Source video<select id="shorts-asset"></select></label>
+      <label>What should we look for?<textarea id="shorts-prompt" maxlength="2000" placeholder="Optional: Find the strongest practical advice or surprising moment"></textarea></label>
+      <div class="field-row"><label>Language<select id="shorts-language"><option value="auto">Auto</option><option value="en">English</option><option value="he">Hebrew</option></select></label><label>Drafts<input id="shorts-count" type="number" min="1" max="10" value="5" /></label></div>
+      <div class="field-row"><label>Minimum seconds<input id="shorts-min" type="number" min="15" max="90" value="15" /></label><label>Maximum seconds<input id="shorts-max" type="number" min="15" max="90" value="90" /></label></div>
+      <button class="primary full" type="submit">Analyze source</button>
+    </form>
+    <div id="shorts-progress" class="shorts-progress" hidden><strong id="shorts-stage">Queued</strong><span id="shorts-detail">Waiting for the analysis worker</span><progress id="shorts-progress-bar" max="1" value="0"></progress><button id="cancel-shorts" type="button">Cancel</button></div>
+    <div id="shorts-results" class="shorts-results"></div>
+  </dialog>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

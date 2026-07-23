@@ -1,0 +1,356 @@
+// Verbalogix Lab — Prisma schema
+// Sprint 1: User, Workspace, Project, Asset, RenderJob, BrandSkill, PlatformConnection, PlatformPublication
+// Source: /storage/emulated/0/Download/claude-projects/custom/video-lab-implementation-plan.md §5
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Identity
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id         String            @id @default(cuid())
+  email      String            @unique
+  name       String?
+  image      String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  workspaces WorkspaceMember[]
+  sessions   Session[]
+  accounts   Account[]
+
+  @@index([email])
+}
+
+// Auth.js v4 models — standard NextAuth adapter shape.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tenancy
+// ─────────────────────────────────────────────────────────────
+
+enum Plan {
+  FREE
+  STARTER
+  STUDIO
+  AGENCY
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+model Workspace {
+  id               String                @id @default(cuid())
+  name             String
+  slug             String                @unique
+  stripeCustomerId String?               @unique
+  stripeSubId      String?               @unique
+  plan             Plan                  @default(FREE)
+  planRenewalAt    DateTime?
+  apiKeyHash       String?               @unique // SHA-256 of the SDK/MCP bearer token
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  members      WorkspaceMember[]
+  projects     Project[]
+  brandSkill   BrandSkill?
+  connections  PlatformConnection[]
+
+  @@index([slug])
+}
+
+model WorkspaceMember {
+  userId      String
+  workspaceId String
+  role        Role       @default(EDITOR)
+  joinedAt    DateTime   @default(now())
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@id([userId, workspaceId])
+  @@index([workspaceId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Projects & assets
+// ─────────────────────────────────────────────────────────────
+
+enum ProjectStatus {
+  DRAFT
+  INGESTING
+  READY
+  ARCHIVED
+}
+
+enum AssetKind {
+  RAW           // the original upload
+  TRANSCRIPT    // whisper JSON
+  SCENE_DATA    // PySceneDetect JSON
+  EDIT_DECISION // atomizer output
+  SCRATCH       // intermediate render scratch (short-lived)
+  DELIVERABLE   // final per-variant MP4
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  workspaceId String
+  name        String
+  status      ProjectStatus @default(DRAFT)
+  description String?       @db.Text
+  engineProjectId String?    @unique
+  engineRevision  Int?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assets    Asset[]
+  renders   RenderJob[]
+  chamberRuns ChamberRun[]
+
+  @@index([workspaceId, createdAt])
+}
+
+model Asset {
+  id         String    @id @default(cuid())
+  projectId  String
+  kind       AssetKind
+  r2Bucket   String    // masters or deliverables
+  r2Key      String
+  mimeType   String?
+  sizeBytes  BigInt
+  durationMs Int?
+  metadata   Json?     // transcript JSON, scene data, EDL, etc.
+  engineAssetId String? @unique
+  sha256      String?
+  createdAt  DateTime  @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, kind])
+}
+
+enum ChamberRunStatus {
+  INGESTING
+  ANALYZING
+  DRAFTS_READY
+  IN_REVIEW
+  RENDERING
+  VERIFYING
+  READY_TO_PUBLISH
+  FAILED
+  CANCELLED
+  HALTED_BRAND_VIOLATION
+}
+
+enum ChamberVariantStatus {
+  PENDING
+  DRAFT_READY
+  HALTED_BRAND_VIOLATION
+  ACCEPTED
+  RENDERING
+  VERIFYING
+  READY_TO_PUBLISH
+  FAILED
+  CANCELLED
+}
+
+model ChamberRun {
+  id                    String           @id @default(cuid())
+  projectId             String
+  engineProjectId       String
+  sourceEngineAssetId   String
+  sourceRevision        Int
+  sourceSha256          String
+  requestedVariants     PlatformVariant[]
+  language              String           @default("auto")
+  prompt                String?          @db.Text
+  brandSkillVersion     Int
+  brandContractHash     String
+  brandContractSnapshot Json
+  analysisJobId         String?          @unique
+  status                ChamberRunStatus @default(INGESTING)
+  errorCode             String?
+  errorDetail           String?          @db.Text
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  project  Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  variants ChamberVariant[]
+
+  @@index([projectId, createdAt])
+  @@index([status, updatedAt])
+}
+
+model ChamberVariant {
+  id                    String               @id @default(cuid())
+  chamberRunId          String
+  variant               PlatformVariant
+  suggestionId          String?              @unique
+  engineProjectId       String?
+  engineRevision        Int?
+  renderJobId           String?              @unique
+  receiptId             String?              @unique
+  deliverableAssetId    String?
+  status                ChamberVariantStatus @default(PENDING)
+  warningDetails        Json?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  chamberRun ChamberRun @relation(fields: [chamberRunId], references: [id], onDelete: Cascade)
+
+  @@unique([chamberRunId, variant])
+  @@index([chamberRunId, status])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Render pipeline
+// ─────────────────────────────────────────────────────────────
+
+enum PlatformVariant {
+  LINKEDIN_16_9
+  YT_LONG_16_9
+  YT_SHORTS_9_16
+  TIKTOK_9_16
+  IG_REELS_9_16
+  FB_FEED_16_9
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  HALTED_BRAND_VIOLATION
+  CANCELLED
+}
+
+model RenderJob {
+  id               String          @id @default(cuid())
+  projectId        String
+  variant          PlatformVariant
+  status           JobStatus       @default(QUEUED)
+  progress         Int             @default(0) // 0-100
+  editDecisionList Json?           // atomizer output for this variant
+  outputAssetId    String?         @unique
+  error            String?         @db.Text
+  attempt          Int             @default(0)
+  queuedAt         DateTime        @default(now())
+  startedAt        DateTime?
+  completedAt      DateTime?
+
+  project       Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  publications  PlatformPublication[]
+
+  @@index([projectId, status])
+  @@index([status, queuedAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Brand-consistency skill (runtime contract)
+// ─────────────────────────────────────────────────────────────
+
+model BrandSkill {
+  workspaceId String    @id
+  markdown    String    @db.Text  // the raw .skill.md content
+  version     Int       @default(1)
+  updatedAt   DateTime  @updatedAt
+  updatedById String?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Platform publishing (DIY OAuth, encrypted tokens)
+// ─────────────────────────────────────────────────────────────
+
+enum Platform {
+  YOUTUBE
+  LINKEDIN
+  TIKTOK
+  INSTAGRAM
+  FACEBOOK
+}
+
+enum PublishStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+model PlatformConnection {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  platform         Platform
+  handle           String?   // @verbalogix on the platform
+  accessTokenEnc   String    @db.Text    // AES-256-GCM ciphertext, base64
+  refreshTokenEnc  String?   @db.Text
+  expiresAt        DateTime?
+  scopeGranted     String[]  @default([])
+  lastRefreshAt    DateTime?
+  createdAt        DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, platform])
+  @@index([workspaceId])
+}
+
+model PlatformPublication {
+  id              String         @id @default(cuid())
+  renderJobId     String
+  platform        Platform
+  platformPostId  String?        // the platform's own ID for the post
+  postUrl         String?
+  status          PublishStatus  @default(PENDING)
+  publishedAt     DateTime?
+  error           String?        @db.Text
+  metrics         Json?          // Sprint 3+: retention, views, CTR
+
+  renderJob RenderJob @relation(fields: [renderJobId], references: [id], onDelete: Cascade)
+
+  @@index([renderJobId])
+  @@index([platform, status])
+}

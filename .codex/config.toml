@@ -1,0 +1,14 @@
+[mcp_servers.sag_video]
+enabled = true
+required = false
+command = "/data/data/com.termux/files/usr/bin/python"
+args = ["-m", "sag_video.mcp_server"]
+cwd = "/data/data/com.termux/files/home/openai/sag-video/services/sag-engine"
+startup_timeout_sec = 10.0
+tool_timeout_sec = 180.0
+
+[mcp_servers.sag_video.env]
+PYTHONPATH = "src"
+SAG_VIDEO_URL = "http://127.0.0.1:8080"
+SAG_VIDEO_PROJECT_ID = "demo"
+SAG_VIDEO_TOKEN_FILE = "/data/data/com.termux/files/home/openai/sag-video/.sag-video/codex-token"

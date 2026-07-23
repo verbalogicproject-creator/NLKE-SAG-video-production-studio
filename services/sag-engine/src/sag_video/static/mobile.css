@@ -1,0 +1,321 @@
+.visually-hidden {
+  width: 1px;
+  height: 1px;
+  position: absolute !important;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  margin: -1px;
+  border: 0;
+  padding: 0;
+  white-space: nowrap;
+}
+
+[hidden] { display: none !important; }
+
+.media-thumb {
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.media-item em {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.media-item button {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-color: #5e5045;
+  color: var(--accent);
+  font-size: 9px;
+}
+
+.project-switcher {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.project-switcher select {
+  width: auto;
+  max-width: 210px;
+  min-height: 28px;
+  padding: 4px 7px;
+  font-size: 10px;
+}
+
+.project-switcher button {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.mobile-nav { display: none; }
+
+.monitor > video {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  transform-origin: center;
+  background: #0b0d0e;
+}
+
+.monitor > #result-video {
+  z-index: 4;
+  object-fit: contain;
+}
+
+.monitor.showing-result .monitor-grid,
+.monitor.showing-result .safe-area,
+.monitor.showing-result .title-card { display: none !important; }
+
+.monitor-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.monitor-grid,
+.safe-area { pointer-events: none; }
+
+.transport .transport-line {
+  flex: 1;
+  min-width: 60px;
+}
+
+.check-label { align-content: end; }
+
+.check-label input {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  accent-color: var(--accent);
+}
+
+@media (max-width: 800px) {
+  body {
+    min-width: 0;
+    padding-bottom: 58px;
+  }
+
+  .topbar {
+    height: auto;
+    min-height: 116px;
+    grid-template-areas:
+      "brand actions"
+      "project project";
+    grid-template-columns: minmax(100px, 1fr) auto;
+    gap: 10px 12px;
+    padding: 10px 14px 12px;
+  }
+
+  .brand { grid-area: brand; }
+  .brand small { display: none; }
+  .actions { grid-area: actions; gap: 5px; }
+
+  .actions button {
+    min-height: 38px;
+    padding: 6px 9px;
+    white-space: nowrap;
+  }
+
+  .actions .primary { min-width: 68px; }
+
+  .project-title {
+    grid-area: project;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: start;
+    gap: 4px 12px;
+    text-align: left;
+  }
+
+  .project-switcher {
+    grid-column: 1 / 3;
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .project-switcher select {
+    flex: 1;
+    width: 100%;
+    max-width: none;
+  }
+
+  .project-title strong { font-size: 11px; }
+
+  .mobile-nav {
+    height: 58px;
+    position: fixed;
+    z-index: 20;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-top: 1px solid var(--line-strong);
+    padding: 5px 6px max(5px, env(safe-area-inset-bottom));
+    background: #17191c;
+  }
+
+  .mobile-nav button {
+    min-height: 46px;
+    border: 0;
+    border-radius: var(--radius-small);
+    padding: 6px 3px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .mobile-nav button.active,
+  .mobile-nav button[aria-current="true"] {
+    background: #272a2d;
+    color: var(--ink);
+  }
+
+  .workspace {
+    height: auto;
+    min-height: calc(100dvh - 116px);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .panel { scroll-margin-top: 10px; }
+
+  .media-panel {
+    order: 1;
+    padding: 14px;
+  }
+
+  .media-grid {
+    grid-auto-columns: minmax(152px, 42vw);
+    grid-auto-flow: column;
+    grid-template-columns: none;
+    gap: 10px;
+    overflow-x: auto;
+    margin: 0 -14px;
+    padding: 0 14px 10px;
+    scroll-padding-left: 14px;
+    scroll-snap-type: x proximity;
+  }
+
+  .media-item { scroll-snap-align: start; }
+  .media-thumb { height: 100px; }
+
+  .semantic-card {
+    margin-top: 8px;
+    padding-top: 14px;
+  }
+
+  .stage {
+    order: 2;
+    min-height: 318px;
+  }
+
+  .stage-heading { padding: 14px 14px 0; }
+
+  .monitor-shell { padding: 8px 12px 10px; }
+
+  .monitor {
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-small);
+    box-shadow: 0 10px 24px rgb(0 0 0 / 24%);
+  }
+
+  .transform-box button { width: 24px; min-width: 24px; height: 24px; min-height: 24px; }
+  .resize-handle { right: 4px; bottom: 4px; }
+  .rotate-handle { top: 4px; left: calc(50% - 12px); }
+  .trim-handle { width: 22px; }
+  .trim-handle::after { left: 10px; }
+
+  .transport {
+    height: 50px;
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .render-dock {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .render-dock progress { grid-column: 1 / 3; grid-row: 2; }
+
+  .timeline {
+    order: 3;
+    min-height: 284px;
+    overflow-x: auto;
+    padding: 0 10px;
+  }
+
+  .timeline-tools {
+    width: max-content;
+    min-width: 100%;
+    padding-right: 8px;
+  }
+
+  .timeline-tools button { min-height: 38px; }
+  .timeline-tools > span { min-width: 12px; }
+
+  .ruler,
+  #tracks { min-width: 720px; }
+
+  .inspector {
+    order: 4;
+    min-height: 340px;
+    overflow: visible;
+    padding: 16px 14px 26px;
+  }
+
+  .receipt-panel { min-height: 190px; }
+
+  dialog {
+    width: min(calc(100vw - 24px), 430px);
+    max-height: calc(100dvh - 24px);
+    overflow: auto;
+    padding: 24px 18px;
+  }
+
+  .pair-code { font-size: 30px; }
+
+  .toast {
+    width: calc(100vw - 24px);
+    bottom: 70px;
+    text-align: center;
+  }
+}
+
+@media (max-width: 430px) {
+  .topbar { padding-inline: 12px; }
+  .mark { width: 30px; height: 30px; }
+  .brand { gap: 8px; font-size: 13px; }
+  .actions button { padding-inline: 7px; font-size: 11px; }
+  .actions .primary { min-width: 62px; }
+  .field-row { gap: 8px; }
+  .resolution { font-size: 9px; }
+}
+
+@media (min-width: 801px) and (max-width: 1100px) {
+  body { min-width: 0; }
+  .workspace { grid-template-columns: 196px minmax(420px, 1fr) 250px; }
+  .topbar { grid-template-columns: minmax(150px, 1fr) minmax(250px, 1fr) auto; }
+  .actions button { padding-inline: 8px; }
+  .brand small { display: none; }
+  .media-panel, .inspector { padding-inline: 12px; }
+}

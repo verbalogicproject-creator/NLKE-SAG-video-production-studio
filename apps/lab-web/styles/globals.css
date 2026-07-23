@@ -1,0 +1,99 @@
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ════════════════════════════════════════════════════════════
+   Font faces — self-hosted so nothing breaks if a CDN is down.
+   Drop woff2 files into apps/web/public/fonts/ before first deploy.
+   Söhne is licensed — use Geist as fallback if not licensed yet.
+   ════════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/IBMPlexMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('/fonts/IBMPlexMono-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Söhne';
+  src: url('/fonts/soehne-buch.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Söhne';
+  src: url('/fonts/soehne-kraftig.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ════════════════════════════════════════════════════════════
+   Base reset — on top of Tailwind preflight
+   ════════════════════════════════════════════════════════════ */
+
+html,
+body {
+  background: rgb(var(--bg-0));
+  color: rgb(var(--ink-0));
+  font-family: var(--font-display);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Data tokens always monospace + uppercase + tracked */
+.data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Panel grid utility */
+.panel-grid {
+  display: grid;
+  gap: var(--grid-gutter);
+}
+
+/* Sub-pixel hairline border (matches 1px at any DPR) */
+.hairline {
+  box-shadow: inset 0 0 0 1px rgb(var(--border));
+}
+.hairline-strong {
+  box-shadow: inset 0 0 0 1px rgb(var(--border-strong));
+}
+
+/* Focus ring — amber 2px, no rounded corners */
+:focus-visible {
+  outline: 2px solid rgb(var(--amber));
+  outline-offset: 1px;
+}
+
+button, a, input, select, textarea {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color     var(--dur-fast) var(--ease),
+    color            var(--dur-fast) var(--ease);
+}

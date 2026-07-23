@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.sag-video/
+dist/
+build/
+*.egg-info/
+.env*
+!.env.example
+node_modules/
+.next/
+.turbo/
+coverage/
+*.tsbuildinfo
+services/sag-engine/.sag-video/
+.termux-run/

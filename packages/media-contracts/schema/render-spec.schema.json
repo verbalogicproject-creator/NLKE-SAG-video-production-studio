@@ -1,0 +1,304 @@
+{
+  "$defs": {
+    "RenderCaptionSpec": {
+      "properties": {
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "style": {
+          "additionalProperties": true,
+          "title": "Style",
+          "type": "object"
+        },
+        "words": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Words",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_id",
+        "words",
+        "style"
+      ],
+      "title": "RenderCaptionSpec",
+      "type": "object"
+    },
+    "RenderMediaSpec": {
+      "properties": {
+        "asset_id": {
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "asset_sha256": {
+          "title": "Asset Sha256",
+          "type": "string"
+        },
+        "crop_keyframes": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Crop Keyframes",
+          "type": "array"
+        },
+        "duration_seconds": {
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "fit_mode": {
+          "title": "Fit Mode",
+          "type": "string"
+        },
+        "gain_db": {
+          "title": "Gain Db",
+          "type": "number"
+        },
+        "has_audio": {
+          "title": "Has Audio",
+          "type": "boolean"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "video",
+            "audio"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "muted": {
+          "title": "Muted",
+          "type": "boolean"
+        },
+        "opacity": {
+          "title": "Opacity",
+          "type": "number"
+        },
+        "output_height": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Height"
+        },
+        "output_width": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Width"
+        },
+        "rotation": {
+          "title": "Rotation",
+          "type": "number"
+        },
+        "scale": {
+          "title": "Scale",
+          "type": "number"
+        },
+        "source_height": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Height"
+        },
+        "source_in_seconds": {
+          "title": "Source In Seconds",
+          "type": "number"
+        },
+        "source_width": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Width"
+        },
+        "start_seconds": {
+          "title": "Start Seconds",
+          "type": "number"
+        },
+        "x": {
+          "title": "X",
+          "type": "integer"
+        },
+        "y": {
+          "title": "Y",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item_id",
+        "asset_id",
+        "kind",
+        "asset_sha256",
+        "has_audio",
+        "start_seconds",
+        "duration_seconds",
+        "source_in_seconds",
+        "fit_mode",
+        "x",
+        "y",
+        "scale",
+        "opacity",
+        "rotation",
+        "gain_db",
+        "muted"
+      ],
+      "title": "RenderMediaSpec",
+      "type": "object"
+    },
+    "RenderTitleSpec": {
+      "properties": {
+        "color": {
+          "title": "Color",
+          "type": "string"
+        },
+        "end_seconds": {
+          "title": "End Seconds",
+          "type": "number"
+        },
+        "height": {
+          "title": "Height",
+          "type": "integer"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "start_seconds": {
+          "title": "Start Seconds",
+          "type": "number"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "width": {
+          "title": "Width",
+          "type": "integer"
+        },
+        "x": {
+          "title": "X",
+          "type": "integer"
+        },
+        "y": {
+          "title": "Y",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item_id",
+        "text",
+        "start_seconds",
+        "end_seconds",
+        "x",
+        "y",
+        "width",
+        "height",
+        "color"
+      ],
+      "title": "RenderTitleSpec",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "captions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RenderCaptionSpec"
+      },
+      "title": "Captions",
+      "type": "array"
+    },
+    "contract_version": {
+      "default": "sag-render-0.2",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "duration_seconds": {
+      "title": "Duration Seconds",
+      "type": "number"
+    },
+    "fps_denominator": {
+      "title": "Fps Denominator",
+      "type": "integer"
+    },
+    "fps_numerator": {
+      "title": "Fps Numerator",
+      "type": "integer"
+    },
+    "height": {
+      "title": "Height",
+      "type": "integer"
+    },
+    "media": {
+      "items": {
+        "$ref": "#/$defs/RenderMediaSpec"
+      },
+      "title": "Media",
+      "type": "array"
+    },
+    "project_id": {
+      "title": "Project Id",
+      "type": "string"
+    },
+    "project_revision": {
+      "title": "Project Revision",
+      "type": "integer"
+    },
+    "titles": {
+      "items": {
+        "$ref": "#/$defs/RenderTitleSpec"
+      },
+      "title": "Titles",
+      "type": "array"
+    },
+    "width": {
+      "title": "Width",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "project_id",
+    "project_revision",
+    "width",
+    "height",
+    "fps_numerator",
+    "fps_denominator",
+    "duration_seconds",
+    "media",
+    "titles"
+  ],
+  "title": "RenderSpecification",
+  "type": "object"
+}

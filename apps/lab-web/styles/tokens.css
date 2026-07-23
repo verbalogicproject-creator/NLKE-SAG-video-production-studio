@@ -1,0 +1,77 @@
+/* ══════════════════════════════════════════════════════════════
+   Verbalogix Lab — Cutting Room Design Tokens
+   Pro-NLE console aesthetic. Dark navy + electric amber.
+   Everything consumed by tailwind.config.ts via rgb(var(--…)).
+   ══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Surface (deep navy stack) */
+  --bg-0:          10 14 26;   /* #0a0e1a — app background */
+  --bg-1:          15 20 34;   /* #0f1422 — panel */
+  --bg-2:          21 28 46;   /* #151c2e — panel raised / hover */
+  --border:        30 39 64;   /* #1e2740 */
+  --border-strong: 42 53 82;   /* #2a3552 */
+
+  /* Ink (text hierarchy) */
+  --ink-0: 232 236 245;  /* #e8ecf5 — primary */
+  --ink-1: 148 160 184;  /* #94a0b8 — secondary */
+  --ink-2:  91 103 128;  /* #5b6780 — tertiary, timecodes */
+  --ink-3:  58  67  89;  /* #3a4359 — disabled */
+
+  /* Accent — amber is the ONLY chromatic color on most screens */
+  --amber:     255 178 36;   /* #ffb224 — actions, focus, progress fill */
+  --amber-hot: 255 199 90;   /* #ffc75a — hover */
+  --amber-dim: 138  93 15;   /* #8a5d0f — pressed / dim state */
+
+  /* Signal — reserved meanings, used sparingly */
+  --signal-live: 255 59 59;   /* #ff3b3b — RECORDING / PUBLISHING */
+  --signal-ok:   59 214 113;  /* #3bd671 — READY / COMPLETE */
+  --signal-warn: 255 178 36;  /* same as amber — ATTENTION */
+
+  /* Typography — display for prose, mono for all data */
+  --font-display: 'Söhne', 'Geist', 'Inter', system-ui, sans-serif;
+  --font-mono:    'IBM Plex Mono', 'Geist Mono', ui-monospace, monospace;
+
+  /* Rhythm — 4px base unit, minimal rounding for industrial feel */
+  --unit:   4px;
+  --radius: 2px;
+
+  /* Motion — mechanical, sub-second, no overshoot */
+  --ease:     cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 120ms;  /* immediate feedback (clicks, focus) */
+  --dur:      220ms;  /* state transitions */
+  --dur-slow: 480ms;  /* layout shifts only */
+
+  /* Grid — panels align to this */
+  --grid-column: 48px;
+  --grid-gutter: 8px;
+}
+
+/* This app is dark by nature — force scheme so form controls,
+   scrollbars and select pickers render correctly. */
+:root {
+  color-scheme: dark;
+}
+
+/* Utility selection styling — amber on navy like a timeline caret */
+::selection {
+  background: rgb(var(--amber) / 0.35);
+  color: rgb(var(--ink-0));
+}
+
+/* Scrollbar treatment — thin, precise, no rounded caps */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--border-strong)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--border-strong));
+  border-radius: 0;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ink-3));
+}
