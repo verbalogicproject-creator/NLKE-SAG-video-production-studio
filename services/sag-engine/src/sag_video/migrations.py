@@ -9,7 +9,7 @@ from uuid import uuid4
 from .models import Asset, Canvas, Project, Receipt, ReceiptStatus, TimelineItem, Track, utc_now
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 NORMALIZED_SCHEMA = """
@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS projects (
     source_suggestion_id TEXT,
     variant_kind TEXT,
     target_aspect_ratio TEXT,
+    target_variant TEXT,
+    brand_version INTEGER,
+    brand_hash TEXT,
     current_revision INTEGER NOT NULL CHECK(current_revision >= 1),
     schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
     created_at TEXT NOT NULL,
@@ -533,9 +536,9 @@ def write_project_snapshot(
     connection.execute(
         """INSERT INTO projects(
              id,name,workspace_id,parent_project_id,source_project_revision,
-             source_suggestion_id,variant_kind,target_aspect_ratio,current_revision,
-             schema_version,created_at,updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             source_suggestion_id,variant_kind,target_aspect_ratio,target_variant,
+             brand_version,brand_hash,current_revision,schema_version,created_at,updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              name=excluded.name,
              workspace_id=COALESCE(excluded.workspace_id,projects.workspace_id),
@@ -544,6 +547,9 @@ def write_project_snapshot(
              source_suggestion_id=excluded.source_suggestion_id,
              variant_kind=excluded.variant_kind,
              target_aspect_ratio=excluded.target_aspect_ratio,
+             target_variant=excluded.target_variant,
+             brand_version=excluded.brand_version,
+             brand_hash=excluded.brand_hash,
              current_revision=MAX(projects.current_revision, excluded.current_revision),
              schema_version=excluded.schema_version,
              updated_at=excluded.updated_at""",
@@ -551,6 +557,8 @@ def write_project_snapshot(
             project.id, project.name, project.workspace_id or project.id,
             project.parent_project_id, project.source_project_revision,
             project.source_suggestion_id, project.variant_kind, project.target_aspect_ratio,
+            project.target_variant.value if project.target_variant else None,
+            project.brand_version, project.brand_hash,
             project.revision, project.schema_version, created_at, project.updated_at,
         ),
     )
@@ -800,6 +808,9 @@ def read_project_snapshot(connection: sqlite3.Connection, project_id: str, revis
         source_suggestion_id=head["source_suggestion_id"] if "source_suggestion_id" in head.keys() else None,
         variant_kind=head["variant_kind"] if "variant_kind" in head.keys() else None,
         target_aspect_ratio=head["target_aspect_ratio"] if "target_aspect_ratio" in head.keys() else None,
+        target_variant=head["target_variant"] if "target_variant" in head.keys() else None,
+        brand_version=head["brand_version"] if "brand_version" in head.keys() else None,
+        brand_hash=head["brand_hash"] if "brand_hash" in head.keys() else None,
         schema_version=int(head["schema_version"]),
         revision=revision,
         canvas=Canvas(
@@ -1211,6 +1222,26 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 ("normalized_caption_and_crop_children",utc_now()),
             )
             connection.execute("PRAGMA user_version=5")
+        applied.add(5)
+    if 6 not in applied:
+        with connection:
+            project_columns = _table_columns(connection, "projects")
+            for name, sql_type in (
+                ("target_variant", "TEXT"),
+                ("brand_version", "INTEGER"),
+                ("brand_hash", "TEXT"),
+            ):
+                if name not in project_columns:
+                    connection.execute(f"ALTER TABLE projects ADD COLUMN {name} {sql_type}")
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (6,?,?)",
+                ("platform_and_brand_lineage", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=6")
     connection.execute("PRAGMA foreign_keys=ON")
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:
