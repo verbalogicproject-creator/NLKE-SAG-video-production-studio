@@ -52,7 +52,8 @@ class SdkValue:
         return dict(self.__dict__)
 
 
-def test_sdk_client_uses_preview_interaction_shapes():
+def test_sdk_client_uses_preview_interaction_shapes(monkeypatch):
+    monkeypatch.delenv("SAG_GOOGLE_VIDEO_GCS_URI", raising=False)
     interaction_calls = []
     interaction = SdkValue(id="interaction-1", status="completed", output_text="READY")
     interactions = SdkValue(create=lambda **kwargs: interaction_calls.append(kwargs) or interaction, get=lambda **_kwargs: interaction)
@@ -64,8 +65,23 @@ def test_sdk_client_uses_preview_interaction_shapes():
     assert client.start_video(model="veo-3.1-lite-generate-preview", request=GenerativeVideoRequest(prompt="video")) == "operations/video-1"
     assert client.poll(operation_name="operations/video-1")["output"] == {"uri": "https://media.example/video.mp4"}
     client.start_video(model="gemini-omni-flash-preview", request=GenerativeVideoRequest(prompt="video", aspect_ratio="9:16"))
-    assert interaction_calls[-1]["response_format"] == {"type": "video", "aspect_ratio": "9:16", "delivery": "uri"}
+    assert interaction_calls[-1]["response_format"] == {"type": "video", "aspect_ratio": "9:16", "duration": "8s"}
     assert interaction_calls[-1]["generation_config"] == {"video_config": {"task": "text_to_video"}}
+
+
+def test_sdk_client_uses_configured_vertex_gcs_delivery(monkeypatch):
+    monkeypatch.setenv("SAG_GOOGLE_VIDEO_GCS_URI", "gs://video-output/acceptance")
+    calls = []
+    interaction = SdkValue(id="interaction-1", status="pending")
+    client = _SdkClient(SdkValue(interactions=SdkValue(create=lambda **kwargs: calls.append(kwargs) or interaction)))
+    client.start_video(
+        model="gemini-omni-flash-preview",
+        request=GenerativeVideoRequest(prompt="video", aspect_ratio="9:16", duration_seconds=6),
+    )
+    assert calls[-1]["response_format"] == {
+        "type": "video", "aspect_ratio": "9:16", "duration": "6s",
+        "delivery": "uri", "gcs_uri": "gs://video-output/acceptance/",
+    }
 
 
 def test_sdk_client_uses_structured_output_and_veo_negative_prompt():

@@ -61,6 +61,7 @@ class RepoVideoGenerationRequest(BaseModel):
     expected_revision: int = Field(ge=1)
     confirmation_id: str = Field(min_length=8, max_length=120)
     aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    idempotency_key: str = Field(default="initial", min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
 
 
 class CreativeBrief(BaseModel):

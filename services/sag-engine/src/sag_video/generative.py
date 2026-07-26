@@ -225,10 +225,20 @@ class _SdkClient:
             create_interaction = getattr(getattr(self.client, "interactions", None), "create", None)
             if create_interaction is None:
                 raise RuntimeError("installed google-genai SDK does not expose Interactions API")
+            response_format: dict[str, Any] = {
+                "type": "video",
+                "aspect_ratio": request.aspect_ratio,
+                "duration": f"{round(max(3, min(10, request.duration_seconds)))}s",
+            }
+            gcs_uri = os.getenv("SAG_GOOGLE_VIDEO_GCS_URI") or _local_env_value("SAG_GOOGLE_VIDEO_GCS_URI")
+            if gcs_uri:
+                if not gcs_uri.startswith("gs://"):
+                    raise RuntimeError("SAG_GOOGLE_VIDEO_GCS_URI must be a gs:// Cloud Storage URI")
+                response_format.update({"delivery": "uri", "gcs_uri": gcs_uri.rstrip("/") + "/"})
             interaction = create_interaction(
                 model=model,
                 input=request.prompt,
-                response_format={"type": "video", "aspect_ratio": request.aspect_ratio, "delivery": "uri"},
+                response_format=response_format,
                 generation_config={"video_config": {"task": "text_to_video"}},
             )
             identifier = getattr(interaction, "id", None) or getattr(interaction, "name", None)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import importlib.util
 import hmac
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -747,7 +748,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "creative brief and storyboard evidence revisions differ")
         storyboard_revision = proposal_revision(body.storyboard)
         brief_revision = proposal_revision(body.creative_brief)
-        request_id = f"repo_video_{storyboard_revision[:18]}_{body.aspect_ratio.replace(':', '_')}"
+        attempt_revision = hashlib.sha256(body.idempotency_key.encode()).hexdigest()[:10]
+        request_id = f"repo_video_{storyboard_revision[:18]}_{body.aspect_ratio.replace(':', '_')}_{attempt_revision}"
         existing = store.receipt_for_request(project_id, request_id)
         if existing is not None:
             existing_operations = [
@@ -769,6 +771,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evidence_revision": body.storyboard.evidence_revision,
                 "storyboard_revision": storyboard_revision,
                 "creative_brief_revision": brief_revision,
+                "idempotency_key_hash": attempt_revision,
                 "aspect_ratio": body.aspect_ratio,
                 "dispatch_state": "running",
                 "operations": [],
