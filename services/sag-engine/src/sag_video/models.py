@@ -162,6 +162,7 @@ class Project(BaseModel):
 
 class ReceiptStatus(StrEnum):
     ACCEPTED = "accepted"
+    COMMITTED = "committed"
     AWAITING_USER_ACTION = "awaiting_user_action"
     AWAITING_USER_CONSENT = "awaiting_user_consent"
     DISPATCHED = "dispatched"
@@ -170,6 +171,7 @@ class ReceiptStatus(StrEnum):
     ARTIFACT_WRITTEN = "artifact_written"
     AWAITING_OBSERVATION = "awaiting_observation"
     AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_CONSUMER = "awaiting_consumer"
     OBSERVED_SUCCESS = "observed_success"
     OBSERVED_FAILURE = "observed_failure"
     EXECUTION_FAILED = "execution_failed"
@@ -179,6 +181,7 @@ class ReceiptStatus(StrEnum):
 
 
 TERMINAL_RECEIPT_STATUSES = {
+    ReceiptStatus.COMMITTED,
     ReceiptStatus.OBSERVED_SUCCESS,
     ReceiptStatus.OBSERVED_FAILURE,
     ReceiptStatus.EXECUTION_FAILED,
@@ -207,6 +210,31 @@ class CommandRequest(BaseModel):
     expected_revision: int = Field(ge=1)
     request_id: str = Field(min_length=8, max_length=120)
     actor: str = Field(default="browser", min_length=1, max_length=100)
+    confirmation_id: str | None = Field(default=None, min_length=8, max_length=120)
+
+
+class CommandInvocation(BaseModel):
+    command: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class CommandBatchRequest(BaseModel):
+    commands: list[CommandInvocation] = Field(min_length=1, max_length=50)
+    expected_revision: int = Field(ge=1)
+    request_id: str = Field(min_length=8, max_length=120)
+    actor: str = Field(default="browser", min_length=1, max_length=100)
+    confirmation_id: str | None = Field(default=None, min_length=8, max_length=120)
+
+
+class CommandProposalRequest(BaseModel):
+    commands: list[CommandInvocation] = Field(min_length=1, max_length=50)
+    expected_revision: int = Field(ge=1)
+
+
+class ConfirmationCreateRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=120)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    expected_revision: int = Field(ge=1)
 
 
 class SelectionRequest(BaseModel):
@@ -271,6 +299,16 @@ class MediaImportResult(BaseModel):
 
 class PairStartRequest(BaseModel):
     workspace_id: str = "demo"
+    project_id: str | None = None
+    sequence_id: str | None = None
+    scopes: list[str] = Field(
+        default_factory=lambda: [
+            "context:read", "project:read", "project:write", "analysis:run",
+            "render:run", "receipt:read", "focus:write", "release:prepare",
+        ],
+        min_length=1,
+        max_length=16,
+    )
 
 
 class PairAttachRequest(BaseModel):
@@ -293,6 +331,7 @@ class ObservationContract(BaseModel):
     safe_margin_y: int
     marker_rgb: tuple[int, int, int] | None = None
     expect_audio: bool = False
+    expect_captions: bool = False
 
 
 class ObservationFinding(BaseModel):

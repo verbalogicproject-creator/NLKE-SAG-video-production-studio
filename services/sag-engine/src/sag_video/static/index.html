@@ -23,12 +23,12 @@
     </div>
   </header>
 
-  <nav class="mobile-nav" aria-label="Editor sections">
-    <button class="active" aria-current="true" data-pane="media-panel">Media</button><button data-pane="stage">Monitor</button><button data-pane="timeline">Timeline</button><button data-pane="inspector">Inspector</button>
+  <nav class="mobile-nav" aria-label="Editor sections" role="tablist">
+    <button class="active" aria-current="true" aria-selected="true" aria-controls="media-panel" role="tab" data-pane="media-panel">Media</button><button aria-selected="false" aria-controls="stage" role="tab" data-pane="stage">Monitor</button><button aria-selected="false" aria-controls="timeline" role="tab" data-pane="timeline">Timeline</button><button aria-selected="false" aria-controls="inspector" role="tab" data-pane="inspector">Inspector</button>
   </nav>
 
   <main class="workspace">
-    <aside class="media-panel panel">
+    <aside class="media-panel panel mobile-pane-active" id="media-panel">
       <div class="panel-heading"><span>Media</span><button id="import-media" aria-label="Import media">＋</button></div>
       <input id="media-file" class="visually-hidden" type="file" accept="video/*,audio/*,.mkv,.webm,.m4a,.opus" />
       <div class="media-grid" id="media-grid"></div>
@@ -40,7 +40,7 @@
       </div>
     </aside>
 
-    <section class="stage panel">
+    <section class="stage panel" id="stage">
       <div class="stage-heading">
         <span>Program monitor</span>
         <span class="resolution" id="resolution">960 × 540 · 30 fps</span>
@@ -49,6 +49,7 @@
         <div class="monitor" id="monitor">
           <video id="preview-video" playsinline preload="metadata"></video>
           <video id="result-video" playsinline controls preload="metadata" hidden></video>
+          <div class="monitor-placeholder" id="monitor-placeholder" hidden><strong></strong><small>Preview-only demo slate</small></div>
           <div class="monitor-empty" id="monitor-empty">Insert or select an observed video asset</div>
           <div class="monitor-grid"></div>
           <div class="title-card" id="preview-title"><span></span></div>
@@ -61,7 +62,7 @@
       <div class="render-dock" id="render-dock" hidden><span><strong id="render-state">Queued</strong><small id="render-detail">Waiting for the local renderer</small></span><progress id="render-progress" max="1" value="0"></progress><button id="cancel-render">Cancel</button></div>
     </section>
 
-    <aside class="inspector panel">
+    <aside class="inspector panel" id="inspector">
       <div class="panel-heading"><span>Inspector</span><span class="revision-status">Canonical</span></div>
       <div id="inspector-empty" class="empty">Select a timeline item to inspect its semantic properties.</div>
       <form id="title-form" hidden>
@@ -96,10 +97,12 @@
       </div>
     </aside>
 
-    <section class="timeline panel">
-      <div class="timeline-tools"><button id="undo" aria-label="Undo">↶ Undo</button><button id="split" aria-label="Split selected clip">Split</button><button id="delete-item" class="danger" aria-label="Delete selected item">Delete</button><span></span><button id="zoom-out" aria-label="Zoom out">−</button><input id="zoom" aria-label="Timeline zoom" type="range" min="1" max="10" value="5" /><button id="zoom-in" aria-label="Zoom in">＋</button><small>120k ticks/s</small></div>
-      <div class="ruler"><span>00:00</span><span>00:01</span><span>00:02</span><span>00:03</span><span>00:04</span><span>00:05</span><span>00:06</span></div>
-      <div id="tracks"></div>
+    <section class="timeline panel" id="timeline">
+      <div class="timeline-tools"><div class="timeline-edit-tools"><button id="undo" aria-label="Undo">↶ Undo</button><button id="split" aria-label="Split selected clip">Split</button><button id="delete-item" class="danger" aria-label="Delete selected item">Delete</button></div><div class="timeline-zoom-tools"><button id="zoom-out" aria-label="Zoom out">−</button><input id="zoom" aria-label="Timeline zoom" type="range" min="1" max="10" value="5" /><button id="zoom-in" aria-label="Zoom in">＋</button><small>120k ticks/s</small></div></div>
+      <div class="timeline-scroll" tabindex="0" aria-label="Scrollable timeline tracks">
+        <div class="ruler"><span>00:00</span><span>00:01</span><span>00:02</span><span>00:03</span><span>00:04</span><span>00:05</span><span>00:06</span></div>
+        <div id="tracks"></div>
+      </div>
     </section>
   </main>
 

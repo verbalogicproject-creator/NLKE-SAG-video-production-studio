@@ -6,11 +6,7 @@ import { apiError, jsonSafe } from '@/lib/http';
 import { buildMcpManifest, LAB_MCP_TOOLS } from '@/lib/mcp-tools';
 import { storage } from '@/lib/storage';
 import { requireApiKey } from '@/lib/workspace';
-
-const EDIT_COMMANDS = new Set([
-  'timeline.trim_clip', 'timeline.set_title', 'timeline.set_caption_style',
-  'timeline.set_crop_keyframes', 'timeline.set_clip_transform', 'timeline.set_audio_gain',
-]);
+import { resolveBrandContract } from '@/lib/brand-contract';
 
 export async function GET(request: Request) {
   try {
@@ -27,6 +23,95 @@ async function callTool(request: Request, name: string, input: Record<string, un
   const workspaceId = principal.workspaceId;
   if (name === 'projects.list') {
     return db.project.findMany({ where: { workspaceId }, include: { assets: true }, orderBy: { updatedAt: 'desc' } });
+  }
+  if (name.startsWith('sequence.') || name.startsWith('action.') || name.startsWith('spatial.') || name.startsWith('semantic.') || name.startsWith('journal.')) {
+    const sequence = await db.studioSequence.findFirst({
+      where: { id: String(input.sequenceId), project: { workspaceId }, archivedAt: null },
+      include: { project: true },
+    });
+    if (!sequence) throw Object.assign(new Error('sequence not found'), { status: 404 });
+    if (name === 'sequence.context') {
+      const context = await sagEngine.context(workspaceId, sequence.engineProjectId);
+      return { sequence, context };
+    }
+    if (name === 'spatial.snapshot' || name === 'spatial.focus' || name === 'spatial.hierarchy') {
+      const snapshot = await sagEngine.spatialSnapshot(workspaceId, sequence.engineProjectId, {
+        focusId: name === 'spatial.snapshot' ? String(input.focusId ?? '') || null : null,
+        depth: name === 'spatial.hierarchy' ? 'system' : String(input.depth ?? 'context'),
+        hopCount: Number(input.hopCount ?? 2),
+      });
+      return name === 'spatial.focus' ? {
+        projectId: sequence.engineProjectId, revision: snapshot.canonical_revision,
+        projectionHash: snapshot.projection_hash, focus: snapshot.focus,
+      } : snapshot;
+    }
+    if (name === 'spatial.neighborhood') return sagEngine.spatialNeighborhood(
+      workspaceId, sequence.engineProjectId, String(input.entityId), Number(input.hopCount ?? 2),
+    );
+    if (name === 'spatial.blast_radius') return sagEngine.spatialBlastRadius(
+      workspaceId, sequence.engineProjectId, String(input.entityId),
+    );
+    if (name === 'spatial.directive') return sagEngine.requestSpatialDirective(
+      workspaceId, sequence.engineProjectId, {
+        action: input.action, target_ids: input.targetIds ?? [], expected_revision: input.expectedRevision,
+        expected_projection_hash: input.expectedProjectionHash, trace_id: input.traceId,
+        intended_observed_effect: { target_ids: input.targetIds ?? [] },
+      },
+    );
+    if (name === 'spatial.receipt.verify') {
+      const receipt = await sagEngine.receipt(workspaceId, String(input.receiptId));
+      if (receipt.project_id !== sequence.engineProjectId || !String(receipt.command).startsWith('spatial.')) {
+        throw Object.assign(new Error('receipt is outside the requested sequence or is not spatial'), { status: 403 });
+      }
+      return {
+        receiptId: receipt.id, command: receipt.command, status: receipt.status,
+        observed: ['observed_success', 'observed_failure', 'timeout'].includes(String(receipt.status)),
+        payload: receipt.payload,
+      };
+    }
+    if (name === 'semantic.graph') return sagEngine.semanticGraph(
+      workspaceId, sequence.engineProjectId, input.revision === undefined ? undefined : Number(input.revision),
+    );
+    if (name === 'semantic.neighborhood') return sagEngine.semanticNeighborhood(
+      workspaceId, sequence.engineProjectId, {
+        schema_version: 'sag-neighborhood/0.1-draft', scope_uri: input.scopeUri, seed_uris: input.seedUris,
+        mode: input.mode ?? 'adjacent', relationship_kinds: input.relationshipKinds ?? [],
+        max_hops: input.maxHops ?? 2, entity_limit: input.entityLimit ?? 200,
+        edge_limit: input.edgeLimit ?? 400, include_provenance: input.includeProvenance ?? true,
+      },
+    );
+    if (name === 'journal.list') return sagEngine.journalEntries(
+      workspaceId, sequence.engineProjectId, Number(input.limit ?? 200),
+    );
+    if (name === 'journal.verify') return sagEngine.verifyJournal(workspaceId, sequence.engineProjectId);
+    if (name === 'journal.append') return sagEngine.appendJournalEntry(
+      workspaceId, sequence.engineProjectId, {
+        id: input.entryId, kind: input.kind, content: input.content, created_at: input.createdAt,
+        metadata: input.metadata ?? {}, tags: input.tags ?? [], session_id: input.sessionId,
+      },
+    );
+    if (name === 'action.catalog') return sagEngine.activeCommands(workspaceId, sequence.engineProjectId);
+    if (name === 'action.propose') return sagEngine.propose(
+      workspaceId, sequence.engineProjectId,
+      input.commands as Array<{ command: string; arguments: Record<string, unknown> }>,
+      Number(input.expectedRevision),
+    );
+    if (name === 'action.execute') return sagEngine.command(
+      workspaceId, sequence.engineProjectId, String(input.command),
+      input.arguments as Record<string, unknown>, Number(input.expectedRevision), String(input.requestId),
+    );
+    if (name === 'action.batch') return sagEngine.batch(
+      workspaceId, sequence.engineProjectId,
+      input.commands as Array<{ command: string; arguments: Record<string, unknown> }>,
+      Number(input.expectedRevision), String(input.requestId),
+    );
+  }
+  if (name === 'operations.queue') {
+    const [activeHeavy, byState] = await Promise.all([
+      db.canonicalJob.count({ where: { kind: { in: ['ANALYSIS', 'RENDER'] }, state: { in: ['CLAIMED', 'RUNNING'] } } }),
+      db.canonicalJob.groupBy({ by: ['state'], _count: { _all: true } }),
+    ]);
+    return { activeHeavy, configuredHeavyLimit: Number(process.env.GLOBAL_HEAVY_JOB_LIMIT ?? '2'), byState };
   }
   if (name === 'drafts.review') {
     return db.chamberRun.findFirstOrThrow({ where: { id: String(input.runId), project: { workspaceId } }, include: { variants: true } });
@@ -67,7 +152,10 @@ async function callTool(request: Request, name: string, input: Record<string, un
   if (name === 'project.get') return sagEngine.project(workspaceId, row.engineProjectId);
   if (name === 'focused_edit.apply') {
     const command = String(input.command);
-    if (!EDIT_COMMANDS.has(command)) throw Object.assign(new Error('command is outside focused-edit scope'), { status: 422 });
+    const catalog = await sagEngine.activeCommands(workspaceId, row.engineProjectId) as { eligibility?: Array<{ name: string; eligible: boolean }> };
+    if (!catalog.eligibility?.some((entry) => entry.name === command && entry.eligible)) {
+      throw Object.assign(new Error('command is not eligible in the effective registry'), { status: 422 });
+    }
     const result = await sagEngine.command(
       workspaceId, row.engineProjectId, command, input.arguments as Record<string, unknown>,
       Number(input.expectedRevision), String(input.requestId),
@@ -77,6 +165,59 @@ async function callTool(request: Request, name: string, input: Record<string, un
     return result;
   }
   if (name === 'render.start') {
+    if (process.env.CLOUD_EXECUTION_ENABLED === 'true') {
+      const revision = Number(input.projectRevision);
+      const requestId = String(input.requestId);
+      if (!Number.isInteger(revision) || revision !== row.engineRevision) {
+        throw Object.assign(new Error(`stale project revision: expected ${row.engineRevision}, received ${revision}`), { status: 409 });
+      }
+      const workspace = await db.workspace.findUniqueOrThrow({ where: { id: workspaceId } });
+      const startOfDay = new Date();
+      startOfDay.setUTCHours(0, 0, 0, 0);
+      const brand = await resolveBrandContract(workspaceId);
+      if (brand.contract_hash !== row.chamberRun.brandContractHash) {
+        throw Object.assign(new Error('brand contract changed; regenerate drafts'), { status: 409 });
+      }
+      const jobId = randomUUID();
+      const acceptedJobId = await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`sag-render:${workspaceId}`}))`;
+        const duplicate = await tx.canonicalJob.findUnique({
+          where: { workspaceId_requestId: { workspaceId, requestId } },
+        });
+        if (duplicate) {
+          if (duplicate.kind !== 'RENDER' || duplicate.canonicalEntityId !== row.id) {
+            throw Object.assign(new Error('request ID was already used for another mutation'), { status: 409 });
+          }
+          return duplicate.id;
+        }
+        const lockedActive = await tx.chamberVariant.count({
+          where: { chamberRun: { project: { workspaceId } }, status: { in: ['RENDERING', 'VERIFYING'] } },
+        });
+        if (lockedActive >= workspace.renderConcurrencyLimit) {
+          throw Object.assign(new Error('render concurrency quota exceeded'), { status: 409 });
+        }
+        const lockedDaily = await tx.quotaLedger.aggregate({
+          where: { workspaceId, kind: 'RENDER_DAILY', occurredAt: { gte: startOfDay } }, _sum: { amount: true },
+        });
+        if ((lockedDaily._sum.amount ?? 0n) >= BigInt(workspace.dailyRenderLimit)) {
+          throw Object.assign(new Error('daily render quota exceeded'), { status: 409 });
+        }
+        await tx.canonicalJob.create({ data: {
+          id: jobId, workspaceId, projectId: row.chamberRun.projectId, kind: 'RENDER',
+          state: 'DISPATCH_PENDING', requestId, canonicalEntityId: row.id,
+          inputVersion: 'sag-render-job-1', inputSnapshot: {
+            workspaceId, chamberRunId: runId, chamberVariantId: row.id, variant,
+            engineProjectId: row.engineProjectId, projectRevision: revision,
+            requestId, brandContractHash: brand.contract_hash,
+          }, outbox: { create: {} },
+        } });
+        await tx.chamberVariant.update({ where: { id: row.id }, data: { engineRevision: revision, renderJobId: jobId, status: 'RENDERING' } });
+        await tx.chamberRun.update({ where: { id: runId }, data: { status: 'RENDERING' } });
+        await tx.quotaLedger.create({ data: { workspaceId, kind: 'RENDER_DAILY', amount: 1, requestId, metadata: { chamberRunId: runId, variant } } });
+        return jobId;
+      });
+      return { id: null, status: 'accepted', payload: { job_id: acceptedJobId }, project_revision: revision };
+    }
     const receipt = await sagEngine.render(workspaceId, row.engineProjectId, Number(input.projectRevision), String(input.requestId));
     await db.chamberVariant.update({ where: { id: row.id }, data: {
       engineRevision: Number(input.projectRevision), renderJobId: receipt.payload.job_id, receiptId: receipt.id, status: 'RENDERING',
@@ -98,7 +239,7 @@ export async function POST(request: Request) {
       await requireApiKey(request, ['projects:read']);
       return NextResponse.json({ jsonrpc: '2.0', id, result: {
         protocolVersion: '2025-03-26', capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'sag-video-chamber', version: '1.0.0' },
+        serverInfo: { name: 'sag-video', version: '2.0.0' },
       } }, { headers: { 'mcp-session-id': randomUUID() } });
     }
     if (body.method === 'tools/list') {

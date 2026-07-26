@@ -22,7 +22,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const activeRenders = await db.chamberVariant.count({
       where: { chamberRun: { project: { workspaceId } }, status: { in: ['RENDERING', 'VERIFYING'] } },
     });
-    if (activeRenders >= workspace.renderConcurrencyLimit) {
+    if (process.env.CLOUD_EXECUTION_ENABLED !== 'true' && activeRenders >= workspace.renderConcurrencyLimit) {
       return NextResponse.json({ error: 'render_concurrency_quota_exceeded' }, { status: 409 });
     }
     const startOfDay = new Date();
@@ -30,7 +30,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const daily = await db.quotaLedger.aggregate({
       where: { workspaceId, kind: 'RENDER_DAILY', occurredAt: { gte: startOfDay } }, _sum: { amount: true },
     });
-    if ((daily._sum.amount ?? 0n) >= BigInt(workspace.dailyRenderLimit)) {
+    if (process.env.CLOUD_EXECUTION_ENABLED !== 'true' && (daily._sum.amount ?? 0n) >= BigInt(workspace.dailyRenderLimit)) {
       return NextResponse.json({ error: 'daily_render_quota_exceeded' }, { status: 409 });
     }
     const brand = await resolveBrandContract(workspaceId);
@@ -39,6 +39,54 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     }
     const revision = Number(body.projectRevision ?? row.engineRevision);
     const requestId = String(body.requestId ?? `chamber-render-${id}-${variant}-${randomUUID()}`);
+    if (!Number.isInteger(revision) || revision !== row.engineRevision) {
+      return NextResponse.json({ error: 'stale_project_revision', expected: row.engineRevision, received: revision }, { status: 409 });
+    }
+    if (process.env.CLOUD_EXECUTION_ENABLED === 'true') {
+      const jobId = randomUUID();
+      const outcome = await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`sag-render:${workspaceId}`}))`;
+        const duplicate = await tx.canonicalJob.findUnique({
+          where: { workspaceId_requestId: { workspaceId, requestId } },
+        });
+        if (duplicate) {
+          if (duplicate.kind !== 'RENDER' || duplicate.canonicalEntityId !== row.id) {
+            throw Object.assign(new Error('request ID was already used for another mutation'), { status: 409 });
+          }
+          return { updated: row, jobId: duplicate.id };
+        }
+        const lockedActive = await tx.chamberVariant.count({
+          where: { chamberRun: { project: { workspaceId } }, status: { in: ['RENDERING', 'VERIFYING'] } },
+        });
+        if (lockedActive >= workspace.renderConcurrencyLimit) {
+          throw Object.assign(new Error('render concurrency quota exceeded'), { status: 409 });
+        }
+        const lockedDaily = await tx.quotaLedger.aggregate({
+          where: { workspaceId, kind: 'RENDER_DAILY', occurredAt: { gte: startOfDay } }, _sum: { amount: true },
+        });
+        if ((lockedDaily._sum.amount ?? 0n) >= BigInt(workspace.dailyRenderLimit)) {
+          throw Object.assign(new Error('daily render quota exceeded'), { status: 409 });
+        }
+        await tx.canonicalJob.create({ data: {
+          id: jobId, workspaceId, projectId: row.chamberRun.projectId,
+          kind: 'RENDER', state: 'DISPATCH_PENDING', requestId,
+          canonicalEntityId: row.id, inputVersion: 'sag-render-job-1',
+          inputSnapshot: {
+            workspaceId, chamberRunId: id, chamberVariantId: row.id, variant,
+            engineProjectId: row.engineProjectId, projectRevision: revision,
+            requestId, brandContractHash: brand.contract_hash,
+          }, outbox: { create: {} },
+        } });
+        const changed = await tx.chamberVariant.update({
+          where: { id: row.id },
+          data: { engineRevision: revision, renderJobId: jobId, status: 'RENDERING' },
+        });
+        await tx.chamberRun.update({ where: { id }, data: { status: 'RENDERING' } });
+        await tx.quotaLedger.create({ data: { workspaceId, kind: 'RENDER_DAILY', amount: 1, requestId, metadata: { chamberRunId: id, variant } } });
+        return { updated: changed, jobId };
+      });
+      return NextResponse.json(jsonSafe({ variant: outcome.updated, receipt: { id: null, payload: { job_id: outcome.jobId } } }), { status: 202 });
+    }
     const receipt = await sagEngine.render(workspaceId, row.engineProjectId, revision, requestId);
     const [updated] = await db.$transaction([
       db.chamberVariant.update({

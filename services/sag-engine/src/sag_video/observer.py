@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import subprocess
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,19 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
         summary="Audio stream presence matches the render specification" if audio_passed else "Audio stream presence does not match the render specification",
         evidence={"expected_audio": contract.expect_audio, "observed": audio},
     ))
+    if contract.expect_audio and audio:
+        loudness = _run([
+            "ffmpeg", "-nostdin", "-i", str(artifact), "-filter_complex",
+            "ebur128=framelog=verbose", "-f", "null", "-",
+        ], timeout=60)
+        matches = re.findall(rb"I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", loudness.stderr)
+        integrated = float(matches[-1]) if matches else None
+        loudness_passed = integrated is not None and -19.0 <= integrated <= -13.0
+        findings.append(ObservationFinding(
+            code="integrated_loudness", passed=loudness_passed,
+            summary="Integrated loudness is inside the delivery range" if loudness_passed else "Integrated loudness is missing or outside the delivery range",
+            evidence={"integrated_lufs": integrated, "minimum_lufs": -19.0, "maximum_lufs": -13.0},
+        ))
 
     observed_duration = float(metadata.get("format", {}).get("duration", 0))
     duration_passed = abs(observed_duration - contract.duration_seconds) <= max(0.15, 2 / contract.fps)
@@ -143,6 +157,15 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
         summary="Observer decoded a representative output frame",
         evidence={"width": image.width, "height": image.height},
     ))
+    if contract.expect_captions:
+        lower = image.crop((0, image.height // 2, image.width, image.height))
+        bright_pixels = sum(1 for red, green, blue in lower.getdata() if max(red, green, blue) >= 210)
+        caption_passed = bright_pixels >= max(100, image.width * image.height // 2000)
+        findings.append(ObservationFinding(
+            code="caption_pixels_present", passed=caption_passed,
+            summary="Caption-like high-contrast pixels are present" if caption_passed else "Expected caption pixels were not detected",
+            evidence={"bright_pixels": bright_pixels, "sample_region": "lower_half"},
+        ))
     if contract.title_id is None or contract.marker_rgb is None:
         return ObservationResult(passed=all(finding.passed for finding in findings), findings=findings)
     expected = contract.marker_rgb

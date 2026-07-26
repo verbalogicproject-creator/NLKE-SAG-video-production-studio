@@ -19,4 +19,5 @@ ENV NODE_ENV=production
 COPY --from=build /app/workers/cloud-jobs/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/workers/cloud-jobs/node_modules ./workers/cloud-jobs/node_modules
+USER node
 CMD ["node", "dist/index.js"]

@@ -6,22 +6,22 @@
 
 :root {
   /* Surface (deep navy stack) */
-  --bg-0:          10 14 26;   /* #0a0e1a — app background */
-  --bg-1:          15 20 34;   /* #0f1422 — panel */
-  --bg-2:          21 28 46;   /* #151c2e — panel raised / hover */
-  --border:        30 39 64;   /* #1e2740 */
-  --border-strong: 42 53 82;   /* #2a3552 */
+  --bg-0:          14 16 19;
+  --bg-1:          20 23 27;
+  --bg-2:          28 32 37;
+  --border:        47 52 59;
+  --border-strong: 65 72 81;
 
   /* Ink (text hierarchy) */
-  --ink-0: 232 236 245;  /* #e8ecf5 — primary */
-  --ink-1: 148 160 184;  /* #94a0b8 — secondary */
-  --ink-2:  91 103 128;  /* #5b6780 — tertiary, timecodes */
-  --ink-3:  58  67  89;  /* #3a4359 — disabled */
+  --ink-0: 236 239 243;
+  --ink-1: 166 174 184;
+  --ink-2: 112 121 132;
+  --ink-3:  78  86  96;
 
   /* Accent — amber is the ONLY chromatic color on most screens */
-  --amber:     255 178 36;   /* #ffb224 — actions, focus, progress fill */
-  --amber-hot: 255 199 90;   /* #ffc75a — hover */
-  --amber-dim: 138  93 15;   /* #8a5d0f — pressed / dim state */
+  --amber:     91 185 227;
+  --amber-hot: 126 204 239;
+  --amber-dim: 43 112 143;
 
   /* Signal — reserved meanings, used sparingly */
   --signal-live: 255 59 59;   /* #ff3b3b — RECORDING / PUBLISHING */
@@ -34,7 +34,7 @@
 
   /* Rhythm — 4px base unit, minimal rounding for industrial feel */
   --unit:   4px;
-  --radius: 2px;
+  --radius: 8px;
 
   /* Motion — mechanical, sub-second, no overshoot */
   --ease:     cubic-bezier(0.2, 0, 0, 1);

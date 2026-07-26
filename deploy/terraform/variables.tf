@@ -30,3 +30,22 @@ variable "monthly_budget_units" {
   type    = number
   default = 250
 }
+variable "enable_cloud_execution" {
+  type        = bool
+  default     = false
+  description = "Enable canonical heavy-job dispatch only after staging persistence/storage gates pass."
+}
+variable "external_beta_enabled" {
+  type        = bool
+  default     = false
+  description = "Expose the web service publicly only after all production admission gates pass."
+}
+variable "transcription_base_url" {
+  type        = string
+  default     = ""
+  description = "Whisper-compatible transcription API base URL used by the analysis job. Required for cloud acceptance unless the image includes whisper.cpp and a model."
+}
+variable "transcription_model" {
+  type    = string
+  default = "whisper-1"
+}

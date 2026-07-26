@@ -3,20 +3,25 @@ from __future__ import annotations
 import os
 import importlib.util
 import hmac
+import json
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .commands import CommandService
 from .capabilities import detect_capabilities
-from .contracts import COMMAND_REGISTRY, declared_commands
+from .contracts import APPLICATION_ACTIONS, COMMAND_REGISTRY, declared_actions, declared_commands, registry_hash, validate_action_coverage
 from .media import MediaIntakeError, MediaService
 from .models import (
+    CommandBatchRequest,
+    CommandProposalRequest,
+    ConfirmationCreateRequest,
     CommandRequest,
     CommandValidationError,
     ObservationContract,
@@ -36,6 +41,60 @@ from .models import (
 from .rendering import RenderService, RenderValidationError, RenderWorker
 from .shorts import AnalysisWorker, ShortsError, ShortsService, providers_from_env
 from .store import Store
+from .blob_storage import FilesystemBlobStorage, GcsBlobStorage
+from .repository_factory import create_repository
+from .runtime import RuntimeEventService, create_runtime_broker
+from .governance import ProtectedProviderConnectionRequest, ProviderConnectionService
+from .delivery import (
+    DeliveryImportRequest,
+    DeliveryProfileRequest,
+    DeliveryService,
+    ReleaseApprovalRequest,
+    ReleaseDispatchRequest,
+    delivery_schemas,
+)
+from .spatial import (
+    PROJECTION_VERSION,
+    SpatialDirectiveAck,
+    SpatialDirectiveRequest,
+    SpatialDirectiveService,
+    SpatialProjectionService,
+    spatial_schemas,
+)
+from .semantic_graph import (
+    SEMANTIC_PROJECTION_VERSION,
+    SemanticGraphAdapter,
+    StructuralNeighborhoodRequest,
+    semantic_schemas,
+)
+from .journal import (
+    JOURNAL_KIND_DEFINITIONS,
+    JOURNAL_PROTOCOL_VERSION,
+    InadmissibleJournalPayload,
+    JournalEntryRequest,
+    SagJournalService,
+    journal_schemas,
+)
+from .x1_context import x1_context_schemas
+from .model_registry import MODEL_REGISTRY_VERSION, model_registry, model_registry_hash
+from .generative import GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter, ProviderOperation
+from .repo_to_video import (
+    CreativeBrief,
+    GitHubEvidenceClient,
+    RepoStoryboard,
+    RepoVideoRequest,
+    RepoVideoGenerationRequest,
+    SECRET_PATTERNS,
+    StoryboardCommitRequest,
+    creative_director_prompt,
+    evidence_prompt,
+    evidence_revision,
+    parse_creative_brief,
+    parse_storyboard,
+    scene_generation_prompt,
+    scene_negative_prompt,
+)
+from .generation_materializer import materialize
 
 
 @dataclass(frozen=True)
@@ -49,6 +108,13 @@ class Settings:
     observer_url: str = ""
     start_analysis_worker: bool = True
     service_token: str = ""
+    repository_backend: str = "sqlite"
+    database_url: str = ""
+    storage_backend: str = "filesystem"
+    storage_root: str = ".sag-video/storage"
+    storage_cache_dir: str = ".sag-video/cache"
+    gcs_bucket: str = ""
+    start_render_worker: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -62,6 +128,13 @@ class Settings:
             observer_url=os.getenv("SAG_VIDEO_OBSERVER_URL", ""),
             start_analysis_worker=os.getenv("SAG_VIDEO_START_ANALYSIS_WORKER", "1").lower() not in {"0", "false", "no"},
             service_token=os.getenv("SAG_VIDEO_SERVICE_TOKEN", ""),
+            repository_backend=os.getenv("SAG_REPOSITORY_BACKEND", "sqlite"),
+            database_url=os.getenv("DATABASE_URL", ""),
+            storage_backend=os.getenv("SAG_STORAGE_BACKEND", "filesystem"),
+            storage_root=os.getenv("SAG_VIDEO_STORAGE_ROOT", ".sag-video/storage"),
+            storage_cache_dir=os.getenv("SAG_VIDEO_STORAGE_CACHE_DIR", ".sag-video/cache"),
+            gcs_bucket=os.getenv("SAG_VIDEO_GCS_BUCKET", ""),
+            start_render_worker=os.getenv("SAG_VIDEO_START_RENDER_WORKER", "1").lower() not in {"0", "false", "no"},
         )
 
 
@@ -83,14 +156,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     static_dir = Path(__file__).parent / "static"
     artifact_dir = Path(settings.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    store = Store(settings.database_path)
+    store = create_repository(
+        backend=settings.repository_backend,
+        database_path=settings.database_path,
+        database_url=settings.database_url,
+    )
+    if settings.storage_backend == "filesystem":
+        blob_storage = FilesystemBlobStorage(settings.storage_root, settings.storage_cache_dir)
+    elif settings.storage_backend == "gcs":
+        if not settings.gcs_bucket:
+            raise RuntimeError("SAG_VIDEO_GCS_BUCKET is required when SAG_STORAGE_BACKEND=gcs")
+        blob_storage = GcsBlobStorage(settings.gcs_bucket, settings.storage_cache_dir)
+    else:
+        raise RuntimeError(f"unsupported SAG storage backend: {settings.storage_backend}")
     commands = CommandService(store)
+    validate_action_coverage(commands.HANDLERS, {
+        "shorts_job", "render_job", "shared_focus", "browser_upload", "browser_capture",
+        "oauth_connect", "release_approval", "publication_dispatch",
+        "focus_entity_directive", "frame_entity_directive", "isolate_neighborhood_directive",
+        "reveal_dependencies_directive", "reveal_blast_radius_directive", "set_depth_directive",
+        "reset_view_directive",
+    })
+    runtime = RuntimeEventService(
+        store, create_runtime_broker(backend=settings.repository_backend, database_url=settings.database_url)
+    )
+    spatial = SpatialProjectionService(store)
+    semantic_graph = SemanticGraphAdapter(store, spatial)
+    journal = SagJournalService(store, hash_key=os.getenv("SAG_JOURNAL_HMAC_KEY") or None)
+    directives = SpatialDirectiveService(store, spatial, runtime)
+    connections = ProviderConnectionService(store)
+    delivery = DeliveryService(store, runtime)
     capabilities = detect_capabilities()
+    capabilities["generative_media"] = {
+        "provider": "google",
+        "registry_version": MODEL_REGISTRY_VERSION,
+        "registry_hash": model_registry_hash(),
+        "models": model_registry(),
+        "authentication": {
+            "development": "AI Studio API key",
+            "production": "Vertex/ADC or protected provider connection",
+            "browser_credentials_allowed": False,
+        },
+    }
+    generative = GoogleGenerativeAdapter()
+    repo_evidence = GitHubEvidenceClient(os.getenv("GITHUB_TOKEN") or None)
     media = MediaService(
         store,
         settings.media_dir,
         settings.proxy_dir,
         upload_limit_bytes=settings.upload_limit_bytes,
+        blob_storage=blob_storage,
     )
     renderer = RenderService(
         store,
@@ -99,6 +214,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         observer=_remote_observer(settings.observer_url) if settings.observer_url else __import__(
             "sag_video.observer", fromlist=["observe_artifact"]
         ).observe_artifact,
+        blob_storage=blob_storage,
     )
     worker = RenderWorker(store, renderer)
     transcriber, ranker = providers_from_env()
@@ -118,14 +234,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        worker.start()
+        if settings.start_render_worker:
+            worker.start()
         if settings.start_analysis_worker:
             analysis_worker.start()
         try:
             yield
         finally:
-            worker.stop()
+            if settings.start_render_worker:
+                worker.stop()
             analysis_worker.stop()
+            runtime.broker.close()
             store.close()
 
     application = FastAPI(title="SAG Video", version="0.1.0", lifespan=lifespan)
@@ -138,11 +257,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.shorts = shorts
     application.state.analysis_worker = analysis_worker
     application.state.settings = settings
+    application.state.runtime = runtime
+    application.state.spatial = spatial
+    application.state.semantic_graph = semantic_graph
+    application.state.journal = journal
+    application.state.directives = directives
+    application.state.connections = connections
+    application.state.delivery = delivery
+    application.state.generative = generative
+    application.state.repo_evidence = repo_evidence
 
     def _require_workspace(request: Request, project_id: str) -> None:
         workspace_id = getattr(request.state, "workspace_id", None)
         if workspace_id not in {None, "*"} and not store.project_in_workspace(project_id, workspace_id):
             raise HTTPException(403, "paired token is scoped to another workspace")
+        scoped_project = getattr(request.state, "project_id", None)
+        if scoped_project and scoped_project != project_id:
+            raise HTTPException(403, "paired token is scoped to another project")
+
+    def _require_workspace_identity(request: Request, workspace_id: str) -> None:
+        scoped_workspace = getattr(request.state, "workspace_id", None)
+        if scoped_workspace not in {None, "*", workspace_id}:
+            raise HTTPException(403, "paired token is scoped to another workspace")
+
+    def _scopes(request: Request) -> list[str]:
+        return list(getattr(request.state, "scopes", ["*"]))
+
+    def _require_scope(request: Request, scope: str) -> None:
+        scopes = _scopes(request)
+        if "*" not in scopes and scope not in scopes:
+            raise HTTPException(403, f"missing required scope: {scope}")
+
+    def _emit_receipt_transition(receipt: Any) -> None:
+        project = store.get_project(receipt.project_id)
+        runtime.emit(
+            workspace_id=str(project.workspace_id or project.id), project_id=project.id, sequence_id=project.id,
+            revision=project.revision, actor=receipt.actor, kind="receipt.transitioned",
+            payload={"receipt_id": receipt.id, "status": str(receipt.status)},
+        )
+
+    @application.get("/api/workspaces/{workspace_id}/connections")
+    def list_provider_connections(workspace_id: str, http_request: Request) -> dict:
+        _require_workspace_identity(http_request, workspace_id)
+        _require_scope(http_request, "connections:admin")
+        return {"connections": [entry.model_dump(mode="json") for entry in connections.list(workspace_id)]}
+
+    @application.post("/api/workspaces/{workspace_id}/connections", status_code=201)
+    def put_provider_connection(
+        workspace_id: str, body: ProtectedProviderConnectionRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace_identity(http_request, workspace_id)
+        _require_scope(http_request, "connections:admin")
+        return connections.put(workspace_id, body).model_dump(mode="json")
+
+    @application.get("/api/workspaces/{workspace_id}/connections/{connection_id}/protected")
+    def get_protected_provider_connection(
+        workspace_id: str, connection_id: str, http_request: Request,
+    ) -> dict:
+        _require_workspace_identity(http_request, workspace_id)
+        if not getattr(http_request.state, "service_authenticated", False):
+            raise HTTPException(403, "protected connection material is service-only")
+        _require_scope(http_request, "connections:secret")
+        try:
+            return connections.protected(workspace_id, connection_id)
+        except KeyError as error:
+            raise HTTPException(404, "provider connection not found") from error
+
+    @application.delete("/api/workspaces/{workspace_id}/connections/{connection_id}")
+    def revoke_provider_connection(
+        workspace_id: str, connection_id: str, http_request: Request,
+    ) -> dict:
+        _require_workspace_identity(http_request, workspace_id)
+        _require_scope(http_request, "connections:admin")
+        try:
+            return connections.revoke(workspace_id, connection_id).model_dump(mode="json")
+        except KeyError as error:
+            raise HTTPException(404, "provider connection not found") from error
+
+    @application.get("/api/projects/{project_id}/delivery")
+    def get_delivery_state(project_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        return delivery.state(project_id)
+
+    @application.post("/api/projects/{project_id}/delivery/profiles", status_code=201)
+    def put_delivery_profile(
+        project_id: str, body: DeliveryProfileRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "release:prepare")
+        return delivery.put_profile(project_id, body)
+
+    @application.post("/api/projects/{project_id}/delivery/import")
+    def import_delivery_state(
+        project_id: str, body: DeliveryImportRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        if not getattr(http_request.state, "service_authenticated", False):
+            raise HTTPException(403, "delivery migration is service-only")
+        _require_scope(http_request, "release:migrate")
+        return delivery.import_legacy(project_id, body)
+
+    @application.post("/api/projects/{project_id}/release/approvals", status_code=201)
+    def create_release_approval(
+        project_id: str, body: ReleaseApprovalRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "release:approve")
+        try:
+            approval, receipt = delivery.approve(project_id, body)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"approval": approval, "receipt": receipt.model_dump(mode="json")}
+
+    @application.post("/api/projects/{project_id}/release/approvals/{approval_id}/dispatch", status_code=202)
+    def dispatch_release_approval(
+        project_id: str, approval_id: str, body: ReleaseDispatchRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "release:prepare")
+        try:
+            approval, attempts, receipt = delivery.dispatch(
+                project_id, approval_id, body, actor=getattr(http_request.state, "actor", "browser"),
+            )
+        except KeyError as error:
+            raise HTTPException(404, "release approval not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"approval": approval, "attempts": attempts, "receipt": receipt.model_dump(mode="json")}
 
     def _require_unscoped(request: Request) -> None:
         if getattr(request.state, "service_authenticated", False):
@@ -174,6 +415,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if principal:
             request.state.actor = principal["actor_name"]
             request.state.workspace_id = principal["workspace_id"]
+            request.state.project_id = principal.get("project_id")
+            request.state.sequence_id = principal.get("sequence_id")
+            request.state.scopes = principal.get("scopes", [])
+            request.state.pairing_token = principal.get("token")
         if not settings.invite_token:
             return await call_next(request)
 
@@ -185,7 +430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"detail": "invite or paired terminal token required"}, status_code=401)
         response = await call_next(request)
         if supplied == settings.invite_token and not (browser_principal and browser_principal["actor_name"] == "browser"):
-            session_token, _ = store.issue_token("*", "browser")
+            session_token, _ = store.issue_token("*", "browser", scopes=["*"])
             response.set_cookie(
                 "sag_video_session",
                 session_token,
@@ -231,7 +476,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_contract(http_request: Request) -> dict:
         actor = getattr(http_request.state, "actor", "browser")
         return {
-            "application": {"id": "sag-video", "name": "SAG Video", "contract_version": "0.1", "protocol_versions": ["sag-http-0.1"]},
+            "application": {"id": "sag-video", "name": "SAG Video", "contract_version": "0.2", "protocol_versions": ["sag-http-0.2"]},
+            "registry_hash": registry_hash(),
             "entities": {
                 "workspace": {"identity": "stable workspace.id containing source and derived projects"},
                 "project": {"identity": "stable project.id"},
@@ -240,23 +486,294 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "receipt": {"identity": "stable causal receipt.id"},
                 "job": {"identity": "stable persistent job.id"},
                 "artifact": {"identity": "stable observed artifact.id scoped to a project"},
+                "delivery_profile": {"identity": "stable engine-owned delivery profile.id scoped to a project"},
+                "release_approval": {"identity": "stable engine-owned approval.id bound to revision, artifact hashes, destinations, and human actor"},
+                "publication_attempt": {"identity": "stable engine-owned attempt.id bound to one approval and destination"},
                 "analysis_artifact": {"identity": "immutable provider-and-settings-versioned analysis.id"},
                 "suggestion": {"identity": "stable auditable suggestion.id tied to an exact source revision"},
             },
             "commands": declared_commands(),
+            "actions": declared_actions(),
+            "event_definitions": runtime.definitions(),
+            "spatial_schemas": spatial_schemas(),
+            "semantic_graph_schemas": semantic_schemas(),
+            "x1_context_schemas": x1_context_schemas(),
+            "semantic_projection_version": SEMANTIC_PROJECTION_VERSION,
+            "journal_protocol_version": JOURNAL_PROTOCOL_VERSION,
+            "journal_schemas": journal_schemas(),
+            "journal_kinds": list(JOURNAL_KIND_DEFINITIONS),
+            "delivery_schemas": delivery_schemas(),
+            "generative_media": capabilities["generative_media"],
+            "projection_version": PROJECTION_VERSION,
+            "spatial_actions": [
+                action for action in declared_actions() if action["name"].startswith("spatial.")
+            ],
             "authority": {
                 "actor": actor,
+                "scopes": _scopes(http_request),
+                "project_id": getattr(http_request.state, "project_id", None),
+                "sequence_id": getattr(http_request.state, "sequence_id", None),
                 "declared_required_scopes": sorted({entry.required_scope for entry in COMMAND_REGISTRY.values()}),
                 "context_grants_authority": False,
                 "note": "The server evaluates actual authentication, revision, target, and arguments on every invocation.",
             },
             "receipts": {
                 "dispatch_is_success": False,
-                "terminal_states": ["observed_success", "observed_failure", "execution_failed", "denied", "cancelled", "timeout"],
+                "terminal_states": ["committed", "observed_success", "observed_failure", "execution_failed", "denied", "cancelled", "timeout"],
                 "render_nonterminal_states": ["accepted", "dispatched", "rendering", "artifact_written", "awaiting_observation"],
             },
             "capabilities": capabilities,
         }
+
+    @application.post("/api/projects/{project_id}/generative/video", status_code=202)
+    def start_generative_video(project_id: str, body: GenerativeVideoRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        project = store.get_project(project_id)
+        try:
+            operation = generative.start_video(body)
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(422, str(error)) from error
+        receipt = store.create_receipt(
+            project_id=project_id, command="media.generate_video", status=ReceiptStatus.ACCEPTED,
+            request_id=operation.request_id, actor=getattr(http_request.state, "actor", "browser"),
+            project_revision=project.revision,
+            payload={"provider": operation.provider, "model": operation.model, "operation_name": operation.operation_name,
+                     "request_hash": operation.request_id.removeprefix("gen_")},
+        )
+        return {"operation": operation.model_copy(update={"request_id": receipt.id}).model_dump(mode="json"), "receipt": receipt.model_dump(mode="json")}
+
+    @application.post("/api/projects/{project_id}/generative/audio", status_code=202)
+    def start_generative_audio(project_id: str, body: GenerativeAudioRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        project = store.get_project(project_id)
+        try:
+            operation = generative.start_audio(body)
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(422, str(error)) from error
+        receipt = store.create_receipt(
+            project_id=project_id, command="media.generate_audio", status=ReceiptStatus.ACCEPTED,
+            request_id=operation.request_id, actor=getattr(http_request.state, "actor", "browser"),
+            project_revision=project.revision,
+            payload={"provider": operation.provider, "model": operation.model, "operation_name": operation.operation_name,
+                     "request_hash": operation.request_id.removeprefix("gen_")},
+        )
+        return {"operation": operation.model_copy(update={"request_id": receipt.id}).model_dump(mode="json"), "receipt": receipt.model_dump(mode="json")}
+
+    @application.get("/api/projects/{project_id}/generative/receipts/{receipt_id}")
+    def poll_generative(project_id: str, receipt_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            receipt = store.get_receipt(receipt_id)
+        except KeyError as error:
+            raise HTTPException(404, "generative receipt not found") from error
+        if receipt.project_id != project_id:
+            raise HTTPException(404, "generative receipt not found")
+        operation_name = receipt.payload.get("operation_name")
+        if not operation_name:
+            raise HTTPException(409, "receipt has no provider operation")
+        operation = ProviderOperation(request_id=receipt.id, model=str(receipt.payload.get("model")), operation_name=str(operation_name))
+        try:
+            observed = generative.poll(operation)
+        except RuntimeError as error:
+            receipt = store.update_receipt(receipt, ReceiptStatus.EXECUTION_FAILED, {"error_code": "provider_poll_failed", "error_detail": str(error)})
+            raise HTTPException(502, str(error)) from error
+        if observed.state == "completed":
+            receipt = store.update_receipt(receipt, ReceiptStatus.AWAITING_OBSERVATION, {"provider_output": {"available": True}})
+        elif observed.state == "failed":
+            receipt = store.update_receipt(receipt, ReceiptStatus.EXECUTION_FAILED, {"error_code": observed.error_code, "error_detail": observed.error_detail})
+        return {"operation": observed.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json")}
+
+    @application.post("/api/projects/{project_id}/repo-to-video/evidence")
+    def inspect_repository_for_video(project_id: str, body: RepoVideoRequest, http_request: Request) -> dict:
+        """Fetch bounded repository evidence for a later human-approved storyboard."""
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        try:
+            evidence = repo_evidence.fetch(body)
+        except (httpx.HTTPError, ValueError) as error:
+            raise HTTPException(422, f"repository evidence unavailable: {error}") from error
+        return {
+            "evidence": evidence.model_dump(mode="json"),
+            "evidence_revision": evidence_revision(evidence),
+            "redaction": {"status": "passed", "bounded": True, "secret_patterns_applied": len(SECRET_PATTERNS)},
+            "factuality": {"status": "evidence_bound", "unsupported_claims_allowed": False},
+            "next_step": "generate_creative_brief_then_review_storyboard",
+        }
+
+    @application.post("/api/projects/{project_id}/repo-to-video/storyboard", status_code=202)
+    def propose_repository_storyboard(project_id: str, body: RepoVideoRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            evidence = repo_evidence.fetch(body)
+            raw = generative.plan_text(
+                model="gemini-omni-flash-preview",
+                prompt=evidence_prompt(body, evidence),
+                response_schema=RepoStoryboard.model_json_schema(),
+            )
+            storyboard = parse_storyboard(raw, evidence=evidence, requested_duration_seconds=body.duration_seconds)
+        except (httpx.HTTPError, RuntimeError, ValueError) as error:
+            raise HTTPException(422, f"storyboard proposal rejected: {error}") from error
+        project = store.get_project(project_id)
+        request_id = f"storyboard_{evidence_revision(evidence)[:24]}"
+        receipt = store.create_receipt(
+            project_id=project_id, command="media.propose_storyboard", status=ReceiptStatus.AWAITING_USER_CONSENT,
+            request_id=request_id, actor=getattr(http_request.state, "actor", "browser"), project_revision=project.revision,
+            payload={"provider": "google", "model": "gemini-omni-flash-preview", "evidence_revision": storyboard.evidence_revision,
+                     "scene_count": len(storyboard.scenes), "duration_seconds": sum(scene.duration_seconds for scene in storyboard.scenes)},
+        )
+        _emit_receipt_transition(receipt)
+        return {"storyboard": storyboard.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json")}
+
+    @application.post("/api/projects/{project_id}/repo-to-video/director/brief", status_code=202)
+    def propose_creative_brief(project_id: str, body: RepoVideoRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            evidence = repo_evidence.fetch(body)
+            raw = generative.plan_text(
+                model="gemini-omni-flash-preview",
+                prompt=creative_director_prompt(body, evidence),
+                response_schema=CreativeBrief.model_json_schema(),
+            )
+            brief = parse_creative_brief(raw, evidence=evidence)
+        except (httpx.HTTPError, RuntimeError, ValueError) as error:
+            raise HTTPException(422, f"creative brief rejected: {error}") from error
+        project = store.get_project(project_id)
+        receipt = store.create_receipt(
+            project_id=project_id, command="media.propose_creative_brief", status=ReceiptStatus.AWAITING_USER_CONSENT,
+            request_id=f"brief_{evidence_revision(evidence)[:24]}", actor=getattr(http_request.state, "actor", "browser"),
+            project_revision=project.revision,
+            payload={"provider": "google", "model": "gemini-omni-flash-preview", "evidence_revision": brief.evidence_revision,
+                     "narrative_beats": len(brief.narrative_arc)},
+        )
+        _emit_receipt_transition(receipt)
+        return {"brief": brief.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json"), "next_step": "review_brief_then_generate_storyboard"}
+
+    @application.post("/api/projects/{project_id}/repo-to-video/storyboard/commit")
+    def commit_repository_storyboard(project_id: str, body: StoryboardCommitRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        human_confirmation = http_request.headers.get("x-sag-human-confirmation", "")
+        human_confirmed_proxy = (
+            getattr(http_request.state, "service_authenticated", False)
+            and hmac.compare_digest(human_confirmation, body.confirmation_id)
+        )
+        if getattr(http_request.state, "actor", "") != "browser" and not human_confirmed_proxy:
+            raise HTTPException(403, "human browser confirmation is required")
+        try:
+            receipt = store.get_receipt(body.receipt_id)
+        except KeyError as error:
+            raise HTTPException(404, "storyboard receipt not found") from error
+        if receipt.project_id != project_id or receipt.command != "media.propose_storyboard":
+            raise HTTPException(404, "storyboard receipt not found")
+        project = store.get_project(project_id)
+        if project.revision != body.expected_revision or receipt.project_revision != body.expected_revision:
+            raise StaleRevisionError(body.expected_revision, project.revision)
+        if receipt.status != ReceiptStatus.AWAITING_USER_CONSENT:
+            return {"receipt": receipt.model_dump(mode="json"), "idempotent": True}
+        updated = store.update_receipt(receipt, ReceiptStatus.COMMITTED, {"human_confirmation_id": body.confirmation_id, "approved_by": getattr(http_request.state, "actor", "browser")})
+        _emit_receipt_transition(updated)
+        return {"receipt": updated.model_dump(mode="json"), "next_step": "enqueue_scene_generation_and_observation"}
+
+    @application.post("/api/projects/{project_id}/repo-to-video/generate", status_code=202)
+    def generate_repository_video(project_id: str, body: RepoVideoGenerationRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        human_confirmation = http_request.headers.get("x-sag-human-confirmation", "")
+        human_confirmed_proxy = (
+            getattr(http_request.state, "service_authenticated", False)
+            and hmac.compare_digest(human_confirmation, body.confirmation_id)
+        )
+        if getattr(http_request.state, "actor", "") != "browser" and not human_confirmed_proxy:
+            raise HTTPException(403, "human browser confirmation is required")
+        project = store.get_project(project_id)
+        if project.revision != body.expected_revision:
+            raise StaleRevisionError(body.expected_revision, project.revision)
+        if body.storyboard.evidence_revision != body.creative_brief.evidence_revision:
+            raise HTTPException(409, "creative brief and storyboard evidence revisions differ")
+        operations: list[dict[str, Any]] = []
+        try:
+            for scene in body.storyboard.scenes:
+                model = scene.generation_model if scene.generation_model in {"gemini-omni-flash-preview", "veo-3.1-generate-preview", "veo-3.1-lite-generate-preview"} else "gemini-omni-flash-preview"
+                prompt = scene_generation_prompt(scene, body.creative_brief, aspect_ratio=body.aspect_ratio)
+                operation = generative.start_video(GenerativeVideoRequest(
+                    model=model,
+                    prompt=prompt,
+                    duration_seconds=min(scene.duration_seconds, 30),
+                    aspect_ratio=body.aspect_ratio,
+                    negative_prompt="" if model == "gemini-omni-flash-preview" else scene_negative_prompt(aspect_ratio=body.aspect_ratio),
+                ))
+                operations.append({"kind": "video", "scene_id": scene.id, **operation.model_dump(mode="json")})
+            music = generative.start_audio(GenerativeAudioRequest(model="lyria-3-clip-preview", text=body.creative_brief.music_prompt, duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 30)))
+            operations.append({"kind": "music", **music.model_dump(mode="json")})
+            narration = generative.start_audio(GenerativeAudioRequest(model="gemini-3.1-flash-tts-preview", text=" ".join(scene.narration for scene in body.storyboard.scenes), duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 600)))
+            operations.append({"kind": "narration", **narration.model_dump(mode="json")})
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(422, f"generation could not start: {error}") from error
+        request_id = f"repo_video_{body.storyboard.evidence_revision[:24]}"
+        receipt = store.create_receipt(
+            project_id=project_id, command="media.repo_to_video_generation", status=ReceiptStatus.ACCEPTED,
+            request_id=request_id, actor=getattr(http_request.state, "actor", "browser"), project_revision=project.revision,
+            payload={"confirmation_id": body.confirmation_id, "evidence_revision": body.storyboard.evidence_revision,
+                     "aspect_ratio": body.aspect_ratio,
+                     "operations": [{"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]} for item in operations]},
+        )
+        _emit_receipt_transition(receipt)
+        return {"receipt": receipt.model_dump(mode="json"), "operations": operations}
+
+    @application.get("/api/projects/{project_id}/repo-to-video/generation/{receipt_id}")
+    def poll_repository_video(project_id: str, receipt_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            receipt = store.get_receipt(receipt_id)
+        except KeyError as error:
+            raise HTTPException(404, "repo-to-video generation receipt not found") from error
+        if receipt.project_id != project_id or receipt.command != "media.repo_to_video_generation":
+            raise HTTPException(404, "repo-to-video generation receipt not found")
+        initial_status = receipt.status
+        results: list[dict[str, Any]] = []
+        failed = False
+        all_done = True
+        for item in receipt.payload.get("operations", []):
+            operation = ProviderOperation(request_id=receipt.id, model=str(item["model"]), operation_name=str(item["operation_name"]))
+            try:
+                observed = generative.poll(operation)
+            except RuntimeError as error:
+                observed = operation.model_copy(update={"state": "failed", "error_code": "provider_poll_failed", "error_detail": str(error)})
+            failed = failed or observed.state == "failed"
+            all_done = all_done and observed.state in {"completed", "failed"}
+            asset_id = item.get("asset_id")
+            if observed.state == "completed" and not asset_id:
+                if not observed.output:
+                    failed = True
+                    observed = observed.model_copy(update={"state": "failed", "error_code": "provider_output_missing", "error_detail": "provider completed without downloadable media"})
+                else:
+                    try:
+                        imported = materialize(media, project_id, observed.output, request_id=f"{receipt.id}_{item['kind']}_{item.get('scene_id', 'all')}", actor=getattr(http_request.state, "actor", "browser"))
+                        if imported.asset is None or imported.receipt.status != ReceiptStatus.OBSERVED_SUCCESS:
+                            raise ValueError("downloaded provider media failed canonical observation")
+                        asset_id = imported.asset.id
+                        item["asset_id"] = asset_id
+                        current = store.get_project(project_id)
+                        insert_receipt = commands.execute(project_id, CommandRequest(command="timeline.insert_asset", arguments={"asset_id": asset_id}, expected_revision=current.revision, request_id=f"{receipt.id}_insert_{asset_id}", actor=getattr(http_request.state, "actor", "browser")), scopes=_scopes(http_request))
+                        if insert_receipt.status != ReceiptStatus.COMMITTED:
+                            raise ValueError("observed provider asset could not be inserted on the canonical timeline")
+                    except (OSError, ValueError, httpx.HTTPError) as error:
+                        failed = True
+                        observed = observed.model_copy(update={"state": "failed", "error_code": "media_materialization_failed", "error_detail": str(error)})
+            results.append({"kind": item["kind"], "scene_id": item.get("scene_id"), "asset_id": asset_id, **observed.model_dump(mode="json")})
+        if not failed and any(item.get("asset_id") for item in receipt.payload.get("operations", [])) and not all_done:
+            receipt = store.update_receipt(receipt, receipt.status, {"operations": receipt.payload.get("operations", [])})
+        if failed:
+            receipt = store.update_receipt(receipt, ReceiptStatus.EXECUTION_FAILED, {"operations_completed": all_done, "assets": [{"kind": item["kind"], "scene_id": item.get("scene_id"), "asset_id": item.get("asset_id")} for item in receipt.payload.get("operations", []) if item.get("asset_id")]})
+        elif all_done:
+            receipt = store.update_receipt(receipt, ReceiptStatus.OBSERVED_SUCCESS, {"operations_completed": True, "assets": [{"kind": item["kind"], "scene_id": item.get("scene_id"), "asset_id": item.get("asset_id")} for item in receipt.payload.get("operations", []) if item.get("asset_id")]})
+        if receipt.status != initial_status:
+            _emit_receipt_transition(receipt)
+        return {"receipt": receipt.model_dump(mode="json"), "operations": results}
 
     @application.get("/api/projects")
     def list_projects(http_request: Request) -> dict:
@@ -310,24 +827,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     continue
         except KeyError as error:
             raise HTTPException(404, f"semantic entity not found: {error.args[0]}") from error
+        token = getattr(http_request.state, "pairing_token", None)
+        actor_focus = store.get_actor_focus(token, project_id)
+        active = _command_projection(project_id, http_request)
         return {
             "project_id": project.id,
+            "sequence_id": getattr(http_request.state, "sequence_id", None) or project.id,
             "revision": project.revision,
+            "shared_focus": selected,
             "selection": selected,
+            "actor_focus": actor_focus,
             "authority": {
-                "reversible_commands": sorted(name for name, declaration in COMMAND_REGISTRY.items() if declaration.reversible),
+                "actor": getattr(http_request.state, "actor", "browser"),
+                "scopes": _scopes(http_request),
+                "project_boundary": getattr(http_request.state, "project_id", None),
                 "context_grants_authority": False,
             },
-            "active_commands": [entry.name for entry in _active_commands(project_id)],
-            "active_variant": "preview",
+            "active_commands": [entry["name"] for entry in active if entry["eligible"]],
+            "command_eligibility": active,
+            "action_eligibility": _action_projection(project_id, http_request),
+            "visible_surface": actor_focus["visible_surface"],
+            "active_workflow": actor_focus["active_workflow"],
             "pending_approvals": [],
         }
 
     def _active_commands(project_id: str):
         entries = list(COMMAND_REGISTRY.values())
-        if store.last_event(project_id) is None:
+        if store.previous_edit_revision(project_id) is None:
             entries = [entry for entry in entries if entry.name != "project.undo"]
+        if store.next_edit_revision(project_id) is None:
+            entries = [entry for entry in entries if entry.name != "project.redo"]
         return sorted(entries, key=lambda entry: entry.name)
+
+    def _command_projection(project_id: str, request: Request) -> list[dict]:
+        scopes = _scopes(request)
+        projected = []
+        for entry in _active_commands(project_id):
+            eligible = "*" in scopes or entry.required_scope in scopes
+            reason = None if eligible else f"missing required scope: {entry.required_scope}"
+            projected.append({
+                "name": entry.name, "eligible": eligible, "reason": reason,
+                "safety_class": entry.safety_class,
+                "confirmation_policy": entry.confirmation_policy,
+                "required_scope": entry.required_scope,
+            })
+        return projected
+
+    def _action_projection(project_id: str, request: Request) -> list[dict]:
+        scopes = _scopes(request)
+        combined = {**COMMAND_REGISTRY, **APPLICATION_ACTIONS}
+        entries = [
+            entry for entry in combined.values()
+            if (entry.name != "project.undo" or store.previous_edit_revision(project_id) is not None)
+            and (entry.name != "project.redo" or store.next_edit_revision(project_id) is not None)
+        ]
+        projected = []
+        for entry in sorted(entries, key=lambda value: value.name):
+            eligible = ("*" in scopes or entry.required_scope in scopes) and "mcp" in entry.eligible_surfaces
+            reason = None
+            if "mcp" not in entry.eligible_surfaces:
+                reason = entry.ineligible_reason or "action is not eligible from this surface"
+            elif "*" not in scopes and entry.required_scope not in scopes:
+                reason = f"missing required scope: {entry.required_scope}"
+            projected.append({
+                "name": entry.name, "eligible": eligible, "reason": reason,
+                "safety_class": entry.safety_class, "confirmation_policy": entry.confirmation_policy,
+                "required_scope": entry.required_scope, "source_hash": entry.source_hash,
+            })
+        return projected
 
     @application.get("/api/projects/{project_id}/commands/active")
     def get_active_commands(project_id: str, http_request: Request) -> dict:
@@ -337,6 +904,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "project_id": project.id,
             "revision": project.revision,
             "commands": [entry.model_dump(mode="json") for entry in _active_commands(project_id)],
+            "eligibility": _command_projection(project_id, http_request),
+            "actions": declared_actions(),
+            "action_eligibility": _action_projection(project_id, http_request),
+            "registry_hash": registry_hash(),
             "context_grants_authority": False,
         }
 
@@ -419,8 +990,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 project.item(item_id)
             except KeyError as error:
                 raise HTTPException(422, f"unknown item: {item_id}") from error
+        token = getattr(http_request.state, "pairing_token", None)
+        if token:
+            _require_scope(http_request, "focus:write")
+            store.set_actor_focus(token, project_id, request.item_ids)
+            runtime.emit(
+                workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+                revision=project.revision, actor=getattr(http_request.state, "actor", request.actor),
+                kind="actor.focus_changed", payload={"entity_ids": request.item_ids, "focus": "actor_local"},
+            )
+            return {"project_id": project_id, "revision": project.revision, "item_ids": request.item_ids, "focus": "actor_local"}
         store.set_selection(project_id, request.item_ids)
-        return {"project_id": project_id, "revision": project.revision, "item_ids": request.item_ids}
+        runtime.emit(
+            workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+            revision=project.revision, actor=getattr(http_request.state, "actor", request.actor),
+            kind="studio.focus_changed", payload={"entity_ids": request.item_ids, "focus": "shared"},
+        )
+        return {"project_id": project_id, "revision": project.revision, "item_ids": request.item_ids, "focus": "shared"}
+
+    @application.post("/api/projects/{project_id}/focus/shared")
+    def set_shared_focus(project_id: str, request: SelectionRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "focus:write")
+        project = store.get_project(project_id)
+        if project.revision != request.expected_revision:
+            raise StaleRevisionError(request.expected_revision, project.revision)
+        for item_id in request.item_ids:
+            try:
+                project.item(item_id)
+            except KeyError as error:
+                raise HTTPException(422, f"unknown item: {item_id}") from error
+        store.set_selection(project_id, request.item_ids)
+        return {"project_id": project_id, "revision": project.revision, "item_ids": request.item_ids, "focus": "shared"}
 
     @application.post("/api/projects/{project_id}/commands", response_model=Receipt)
     def execute_command(project_id: str, request: CommandRequest, http_request: Request) -> Receipt:
@@ -431,11 +1032,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.get_project(project_id)
         except KeyError as error:
             raise HTTPException(404, "project not found") from error
-        return commands.execute(project_id, request)
+        duplicate = store.receipt_for_request(project_id, request.request_id)
+        receipt = commands.execute(project_id, request, scopes=_scopes(http_request))
+        project = store.get_project(project_id)
+        if duplicate is None:
+            runtime.emit(
+                workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+                revision=project.revision, actor=receipt.actor,
+                kind="command.denied" if receipt.status == ReceiptStatus.DENIED else "command.committed",
+                payload={"command": receipt.command, "receipt_id": receipt.id, "reason": receipt.payload.get("reason")},
+            )
+        return receipt
+
+    @application.post("/api/projects/{project_id}/commands/propose")
+    def propose_commands(project_id: str, request: CommandProposalRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        return commands.propose(project_id, request)
+
+    @application.post("/api/projects/{project_id}/commands/batch", response_model=Receipt)
+    def execute_command_batch(project_id: str, request: CommandBatchRequest, http_request: Request) -> Receipt:
+        _require_workspace(http_request, project_id)
+        if hasattr(http_request.state, "actor"):
+            request.actor = http_request.state.actor
+        duplicate = store.receipt_for_request(project_id, request.request_id)
+        receipt = commands.execute_batch(project_id, request, scopes=_scopes(http_request))
+        project = store.get_project(project_id)
+        if duplicate is None:
+            runtime.emit(
+                workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+                revision=project.revision, actor=receipt.actor,
+                kind="command.denied" if receipt.status == ReceiptStatus.DENIED else "command.committed",
+                payload={"command": receipt.command, "receipt_id": receipt.id, "command_count": len(request.commands)},
+            )
+        return receipt
+
+    @application.post("/api/projects/{project_id}/confirmations")
+    def create_confirmation(project_id: str, request: ConfirmationCreateRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        if getattr(http_request.state, "pairing_token", None) and getattr(http_request.state, "actor", "") != "browser":
+            raise HTTPException(403, "human browser confirmation is required")
+        declaration = COMMAND_REGISTRY.get(request.command)
+        if declaration is None or declaration.confirmation_policy != "exact_human_confirmation":
+            raise HTTPException(422, "command does not accept exact human confirmation")
+        project = store.get_project(project_id)
+        if project.revision != request.expected_revision:
+            raise StaleRevisionError(request.expected_revision, project.revision)
+        return store.create_confirmation(
+            project_id, request.command, request.arguments, request.expected_revision,
+            getattr(http_request.state, "actor", "browser"),
+        )
 
     @application.post("/api/projects/{project_id}/renders", response_model=Receipt)
     def start_render(project_id: str, request: RenderRequest, http_request: Request) -> Receipt:
         _require_workspace(http_request, project_id)
+        _require_scope(http_request, "render:run")
         duplicate = store.receipt_for_request(project_id, request.request_id)
         if duplicate:
             return duplicate
@@ -455,11 +1106,203 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload={"project_revision": project.revision, "job_id": job_id},
         )
         renderer.enqueue(spec, receipt, job_id)
+        runtime.emit(
+            workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+            revision=project.revision, actor=actor, kind="job.state_changed",
+            payload={"job_id": job_id, "state": "queued", "kind": "render"},
+        )
         return receipt
+
+    @application.get("/api/projects/{project_id}/spatial/snapshot")
+    def get_spatial_snapshot(
+        project_id: str, http_request: Request, focus_id: str | None = None,
+        depth: str = Query("context", pattern="^(edit|context|system)$"),
+        hop_count: int = Query(2, ge=0, le=6), entity_limit: int = Query(200, ge=10, le=1000),
+        edge_limit: int = Query(400, ge=10, le=2000),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        return spatial.snapshot(
+            project_id, focus_id=focus_id, depth=depth, hop_count=hop_count,
+            entity_limit=entity_limit, edge_limit=edge_limit,
+        ).model_dump(mode="json")
+
+    @application.get("/api/projects/{project_id}/spatial/entities/{entity_id}/neighborhood")
+    def get_spatial_neighborhood(
+        project_id: str, entity_id: str, http_request: Request,
+        hop_count: int = Query(2, ge=0, le=6), entity_limit: int = Query(200, ge=10, le=1000),
+        edge_limit: int = Query(400, ge=10, le=2000),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        snapshot = spatial.neighborhood(
+            project_id, entity_id, hop_count=hop_count,
+            entity_limit=entity_limit, edge_limit=edge_limit,
+        )
+        if entity_id not in {entity.id for entity in snapshot.entities}:
+            raise HTTPException(404, "spatial entity not found")
+        return snapshot.model_dump(mode="json")
+
+    @application.get("/api/projects/{project_id}/semantic/graph")
+    def get_semantic_graph(
+        project_id: str, http_request: Request, revision: int | None = Query(default=None, ge=1),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            return semantic_graph.graph(project_id, revision=revision).model_dump(mode="json")
+        except (KeyError, ValueError) as error:
+            raise HTTPException(409, "requested semantic revision is not retained") from error
+
+    @application.post("/api/projects/{project_id}/semantic/neighborhood")
+    def get_semantic_neighborhood(
+        project_id: str, body: StructuralNeighborhoodRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        return semantic_graph.neighborhood(project_id, body).model_dump(mode="json")
+
+    @application.get("/api/projects/{project_id}/journal")
+    def list_journal_entries(
+        project_id: str, http_request: Request, limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "journal:read")
+        namespace = semantic_graph.graph(project_id).scope_uri
+        return {
+            "protocol_version": JOURNAL_PROTOCOL_VERSION, "namespace": namespace,
+            "entries": [entry.model_dump(mode="json") for entry in journal.entries(namespace, limit=limit)],
+        }
+
+    @application.get("/api/projects/{project_id}/journal/verify")
+    def verify_journal(project_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "journal:read")
+        namespace = semantic_graph.graph(project_id).scope_uri
+        return {
+            "protocol_version": JOURNAL_PROTOCOL_VERSION, "namespace": namespace,
+            "verification": journal.verify(namespace),
+        }
+
+    @application.post("/api/projects/{project_id}/journal/entries", status_code=201)
+    def append_journal_entry(
+        project_id: str, body: JournalEntryRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "journal:write")
+        namespace = semantic_graph.graph(project_id).scope_uri
+        try:
+            entry, inserted = journal.append(namespace, body)
+        except InadmissibleJournalPayload as error:
+            raise HTTPException(422, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {
+            "protocol_version": JOURNAL_PROTOCOL_VERSION, "inserted": inserted,
+            "entry": entry.model_dump(mode="json"),
+        }
+
+    @application.get("/api/projects/{project_id}/spatial/entities/{entity_id}/blast-radius")
+    def get_spatial_blast_radius(
+        project_id: str, entity_id: str, http_request: Request,
+        entity_limit: int = Query(200, ge=10, le=1000), edge_limit: int = Query(400, ge=10, le=2000),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        snapshot = spatial.blast_radius(
+            project_id, entity_id, entity_limit=entity_limit, edge_limit=edge_limit,
+        )
+        if entity_id not in {entity.id for entity in snapshot.entities}:
+            raise HTTPException(404, "spatial entity not found")
+        return snapshot.model_dump(mode="json")
+
+    @application.get("/api/projects/{project_id}/spatial/delta")
+    def get_spatial_delta(
+        project_id: str, http_request: Request, previous_revision: int = Query(ge=1),
+        previous_cursor: int = Query(0, ge=0), previous_projection_hash: str | None = None,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        return spatial.delta(
+            project_id, previous_revision=previous_revision, previous_cursor=previous_cursor,
+            previous_projection_hash=previous_projection_hash,
+        ).model_dump(mode="json")
+
+    @application.get("/api/projects/{project_id}/runtime/events")
+    def get_runtime_events(
+        project_id: str, http_request: Request, cursor: int = Query(0, ge=0),
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        oldest, newest = store.runtime_cursor_bounds(project_id)
+        snapshot_required = bool(cursor and ((oldest is not None and cursor < oldest - 1) or (newest is not None and cursor > newest)))
+        events = [] if snapshot_required else runtime.history(project_id, after_cursor=cursor, limit=limit)
+        return {
+            "project_id": project_id, "cursor": newest or 0, "snapshot_required": snapshot_required,
+            "events": [event.model_dump(mode="json") for event in events],
+        }
+
+    @application.get("/api/projects/{project_id}/runtime/stream")
+    async def stream_runtime_events(project_id: str, http_request: Request, cursor: int = Query(0, ge=0)):
+        _require_workspace(http_request, project_id)
+        header_cursor = http_request.headers.get("last-event-id", "").strip()
+        if header_cursor:
+            try:
+                cursor = int(header_cursor)
+            except ValueError:
+                cursor = -1
+
+        async def event_stream():
+            nonlocal cursor
+            generation = runtime.broker.generation
+            oldest, newest = store.runtime_cursor_bounds(project_id)
+            if cursor < 0 or (cursor and ((oldest is not None and cursor < oldest - 1) or (newest is not None and cursor > newest))):
+                data = json.dumps({"reason": "invalid_or_pruned_cursor", "current_cursor": newest or 0})
+                yield f"event: snapshot_required\nid: {newest or 0}\ndata: {data}\n\n"
+                cursor = newest or 0
+            while not await http_request.is_disconnected():
+                events = runtime.history(project_id, after_cursor=cursor, limit=200)
+                if events:
+                    for event in events:
+                        cursor = event.cursor
+                        data = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+                        yield f"event: {event.kind}\nid: {event.cursor}\ndata: {data}\n\n"
+                    continue
+                yield ": keepalive\n\n"
+                generation = await runtime.broker.wait(generation, timeout=10)
+
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        )
+
+    @application.post("/api/projects/{project_id}/spatial/directives")
+    def post_spatial_directive(
+        project_id: str, directive_request: SpatialDirectiveRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "focus:write")
+        try:
+            receipt, directive = directives.dispatch(
+                project_id, directive_request, actor=getattr(http_request.state, "actor", "browser"),
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        return {"receipt": receipt.model_dump(mode="json"), "directive": directive.model_dump(mode="json")}
+
+    @application.post("/api/spatial/directives/{receipt_id}/ack")
+    def acknowledge_spatial_directive(
+        receipt_id: str, ack: SpatialDirectiveAck, http_request: Request,
+    ) -> dict:
+        try:
+            receipt = store.get_receipt(receipt_id)
+        except KeyError as error:
+            raise HTTPException(404, "directive receipt not found") from error
+        _require_workspace(http_request, receipt.project_id)
+        try:
+            updated = directives.acknowledge(receipt_id, ack)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return updated.model_dump(mode="json")
 
     @application.post("/api/projects/{project_id}/shorts/jobs")
     def start_shorts_job(project_id: str, request: ShortsGenerateRequest, http_request: Request) -> dict:
         _require_workspace(http_request, project_id)
+        _require_scope(http_request, "analysis:run")
         try:
             job = shorts.enqueue(project_id, request)
         except KeyError as error:
@@ -547,8 +1390,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _require_workspace(http_request, artifact.project_id)
         if artifact.managed_uri != f"sag-artifact://{artifact.id}":
             raise HTTPException(404, "invalid render artifact identity")
-        path = (artifact_dir / f"{artifact.id}.mp4").resolve()
-        if not path.is_relative_to(artifact_dir.resolve()) or not path.is_file():
+        try:
+            path = renderer.path_for_artifact(artifact)
+        except (FileNotFoundError, ValueError):
             raise HTTPException(404, "render artifact bytes not found")
         return FileResponse(path, media_type=artifact.mime_type, filename=None)
 
@@ -576,21 +1420,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.post("/api/pairing/start")
     def start_pairing(request: PairStartRequest, http_request: Request) -> dict[str, str]:
-        _require_workspace(http_request, request.workspace_id)
+        project_id = request.project_id or request.workspace_id
+        _require_workspace(http_request, project_id)
         try:
-            store.get_project(request.workspace_id)
+            project = store.get_project(project_id)
         except KeyError as error:
-            raise HTTPException(404, "workspace not found") from error
-        code, expires_at = store.start_pairing(store.workspace_for_project(request.workspace_id))
+            raise HTTPException(404, "project not found") from error
+        code, expires_at = store.start_pairing(
+            store.workspace_for_project(project_id), project_id=project_id,
+            sequence_id=request.sequence_id or project_id, scopes=request.scopes,
+        )
         return {"code": code, "expires_at": expires_at}
 
     @application.post("/api/pairing/attach")
-    def attach_pairing(request: PairAttachRequest) -> dict[str, str]:
+    def attach_pairing(request: PairAttachRequest) -> dict[str, Any]:
         try:
-            token, expires_at, workspace_id = store.attach_pairing(request.code, request.actor_name)
+            token, expires_at, principal = store.attach_pairing(request.code, request.actor_name)
         except ValueError as error:
             raise HTTPException(401, str(error)) from error
-        return {"access_token": token, "expires_at": expires_at, "workspace_id": workspace_id}
+        return {
+            "access_token": token, "expires_at": expires_at,
+            "workspace_id": principal["workspace_id"], "project_id": principal.get("project_id"),
+            "sequence_id": principal.get("sequence_id"), "scopes": principal.get("scopes", []),
+        }
+
+    @application.post("/api/pairing/revoke")
+    def revoke_pairing(http_request: Request) -> dict:
+        token = getattr(http_request.state, "pairing_token", None)
+        if not token:
+            raise HTTPException(400, "request is not authenticated by a pairing token")
+        store.revoke_token(token)
+        return {"revoked": True}
 
     @application.get("/api/pairing/status/{workspace_id}")
     def pairing_status(workspace_id: str, http_request: Request) -> dict:

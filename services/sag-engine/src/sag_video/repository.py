@@ -53,6 +53,10 @@ class ArtifactRecord:
     byte_size: int
     mime_type: str | None
     provenance: dict[str, Any]
+    storage_backend: str | None = None
+    storage_namespace: str | None = None
+    storage_key: str | None = None
+    storage_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,10 @@ class MediaBlobRecord:
     storage_project_id: str
     storage_asset_id: str
     storage_kind: str
+    storage_backend: str | None = None
+    storage_namespace: str | None = None
+    storage_key: str | None = None
+    storage_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,7 @@ class SuggestionRecord:
 @runtime_checkable
 class ProjectRepository(Protocol):
     def get_project(self, project_id: str) -> Project: ...
+    def get_project_for_update(self, project_id: str) -> Project: ...
     def get_project_revision(self, project_id: str, revision: int) -> Project: ...
     def list_projects(self) -> list[Project]: ...
     def create_project(self, name: str, preset: str, workspace_id: str | None = None) -> Project: ...

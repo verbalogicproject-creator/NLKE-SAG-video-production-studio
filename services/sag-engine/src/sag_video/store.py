@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import secrets
 import sqlite3
 import threading
@@ -193,6 +194,10 @@ class Store:
         with self._lock:
             return read_project_snapshot(self._connection, project_id)
 
+    def get_project_for_update(self, project_id: str) -> Project:
+        """Return the project head while holding the current write transaction."""
+        return self.get_project(project_id)
+
     def get_project_revision(self, project_id: str, revision: int) -> Project:
         with self._lock:
             return read_project_snapshot(self._connection, project_id, revision)
@@ -370,17 +375,59 @@ class Store:
                 (project_id,),
             ).fetchone()
 
-    def start_pairing(self, workspace_id: str) -> tuple[str, str]:
+    def _history_target_revision(self, project_id: str) -> int:
+        event = self.last_event(project_id)
+        if event is None:
+            return self.get_project(project_id).revision
+        if str(event["command"]) in {"project.undo", "project.redo"}:
+            arguments = json.loads(event["arguments_json"] or "{}")
+            if "history_target_revision" in arguments:
+                return int(arguments["history_target_revision"])
+        return self.get_project(project_id).revision
+
+    def previous_edit_revision(self, project_id: str) -> int | None:
+        target = self._history_target_revision(project_id)
+        row = self._connection.execute(
+            """SELECT before_revision FROM events
+               WHERE project_id=? AND command NOT IN ('project.undo','project.redo') AND after_revision<=?
+               ORDER BY after_revision DESC,id DESC LIMIT 1""",
+            (project_id, target),
+        ).fetchone()
+        return int(row["before_revision"]) if row else None
+
+    def next_edit_revision(self, project_id: str) -> int | None:
+        event = self.last_event(project_id)
+        if event is None or str(event["command"]) not in {"project.undo", "project.redo"}:
+            return None
+        target = self._history_target_revision(project_id)
+        row = self._connection.execute(
+            """SELECT after_revision FROM events
+               WHERE project_id=? AND command NOT IN ('project.undo','project.redo') AND before_revision>=?
+               ORDER BY before_revision,after_revision,id LIMIT 1""",
+            (project_id, target),
+        ).fetchone()
+        return int(row["after_revision"]) if row else None
+
+    def start_pairing(
+        self,
+        workspace_id: str,
+        *,
+        project_id: str | None = None,
+        sequence_id: str | None = None,
+        scopes: list[str] | None = None,
+    ) -> tuple[str, str]:
         code = f"{secrets.randbelow(1_000_000):06d}"
         expires = datetime.now(timezone.utc) + timedelta(minutes=10)
         with self._write():
             self._connection.execute(
-                "INSERT INTO pairings(code,workspace_id,expires_at,consumed) VALUES (?,?,?,0)",
-                (code, workspace_id, expires.isoformat()),
+                """INSERT INTO pairings(
+                     code,workspace_id,project_id,sequence_id,scopes_json,expires_at,consumed
+                   ) VALUES (?,?,?,?,?,?,0)""",
+                (code, workspace_id, project_id, sequence_id, json.dumps(scopes or []), expires.isoformat()),
             )
         return code, expires.isoformat()
 
-    def attach_pairing(self, code: str, actor_name: str) -> tuple[str, str, str]:
+    def attach_pairing(self, code: str, actor_name: str) -> tuple[str, str, dict[str, Any]]:
         with self.transaction():
             row = self._connection.execute("SELECT * FROM pairings WHERE code=?", (code,)).fetchone()
             if row is None or row["consumed"]:
@@ -388,10 +435,14 @@ class Store:
             if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
                 raise ValueError("expired pairing code")
             self._connection.execute("UPDATE pairings SET consumed=1 WHERE code=?", (code,))
-            token, expires_at = self.issue_token(str(row["workspace_id"]), actor_name)
-        return token, expires_at, str(row["workspace_id"])
+            token, expires_at = self.issue_token(
+                str(row["workspace_id"]), actor_name,
+                project_id=row["project_id"], sequence_id=row["sequence_id"],
+                scopes=json.loads(row["scopes_json"] or "[]"),
+            )
+        return token, expires_at, self.principal_for_token(token) or {}
 
-    def principal_for_token(self, token: str) -> dict[str, str] | None:
+    def principal_for_token(self, token: str) -> dict[str, Any] | None:
         row = self._connection.execute("SELECT * FROM tokens WHERE token=?", (token,)).fetchone()
         if row is None or row["revoked"]:
             return None
@@ -400,6 +451,10 @@ class Store:
         return {
             "actor_name": str(row["actor_name"]),
             "workspace_id": str(row["workspace_id"]),
+            "project_id": str(row["project_id"]) if row["project_id"] else None,
+            "sequence_id": str(row["sequence_id"]) if row["sequence_id"] else None,
+            "scopes": json.loads(row["scopes_json"] or "[]"),
+            "token": token,
             "expires_at": str(row["expires_at"]),
         }
 
@@ -407,27 +462,547 @@ class Store:
         principal = self.principal_for_token(token)
         return principal["actor_name"] if principal else None
 
-    def issue_token(self, workspace_id: str, actor_name: str, *, hours: int = 8) -> tuple[str, str]:
+    def issue_token(
+        self,
+        workspace_id: str,
+        actor_name: str,
+        *,
+        hours: int = 8,
+        project_id: str | None = None,
+        sequence_id: str | None = None,
+        scopes: list[str] | None = None,
+    ) -> tuple[str, str]:
         token = secrets.token_urlsafe(32)
         expires = datetime.now(timezone.utc) + timedelta(hours=hours)
         with self._write():
             self._connection.execute(
-                "INSERT INTO tokens(token,workspace_id,actor_name,expires_at,revoked) VALUES (?,?,?,?,0)",
-                (token, workspace_id, actor_name, expires.isoformat()),
+                """INSERT INTO tokens(
+                     token,workspace_id,project_id,sequence_id,scopes_json,actor_name,expires_at,revoked
+                   ) VALUES (?,?,?,?,?,?,?,0)""",
+                (token, workspace_id, project_id, sequence_id, json.dumps(scopes or ["*"]), actor_name, expires.isoformat()),
             )
         return token, expires.isoformat()
 
     def active_actors(self, workspace_id: str) -> list[dict[str, str]]:
         now = datetime.now(timezone.utc)
         rows = self._connection.execute(
-            "SELECT actor_name,expires_at FROM tokens WHERE workspace_id=? AND revoked=0 ORDER BY rowid DESC",
+            "SELECT actor_name,expires_at,project_id,scopes_json FROM tokens WHERE workspace_id=? AND revoked=0 ORDER BY rowid DESC",
             (workspace_id,),
         ).fetchall()
         return [
-            {"actor_name": str(row["actor_name"]), "expires_at": str(row["expires_at"])}
+            {
+                "actor_name": str(row["actor_name"]), "expires_at": str(row["expires_at"]),
+                "project_id": str(row["project_id"]) if row["project_id"] else None,
+                "scopes": json.loads(row["scopes_json"] or "[]"),
+            }
             for row in rows
             if datetime.fromisoformat(row["expires_at"]) >= now
         ]
+
+    def revoke_token(self, token: str) -> None:
+        with self._write():
+            self._connection.execute("UPDATE tokens SET revoked=1 WHERE token=?", (token,))
+
+    def set_actor_focus(
+        self, token: str, project_id: str, item_ids: list[str],
+        *, visible_surface: str = "studio", active_workflow: str | None = None,
+        active_depth: str = "edit",
+    ) -> None:
+        with self._write():
+            self._connection.execute(
+                """INSERT INTO actor_focus(token,project_id,item_ids_json,visible_surface,active_workflow,active_depth,updated_at)
+                   VALUES (?,?,?,?,?,?,?) ON CONFLICT(token,project_id) DO UPDATE SET
+                   item_ids_json=excluded.item_ids_json,visible_surface=excluded.visible_surface,
+                   active_workflow=excluded.active_workflow,active_depth=excluded.active_depth,
+                   updated_at=excluded.updated_at""",
+                (token, project_id, json.dumps(item_ids), visible_surface, active_workflow, active_depth, utc_now()),
+            )
+
+    def get_actor_focus(self, token: str | None, project_id: str) -> dict[str, Any]:
+        if not token:
+            return {"item_ids": [], "visible_surface": "studio", "active_workflow": None, "active_depth": "edit"}
+        row = self._connection.execute(
+            "SELECT * FROM actor_focus WHERE token=? AND project_id=?", (token, project_id)
+        ).fetchone()
+        if row is None:
+            return {"item_ids": [], "visible_surface": "studio", "active_workflow": None, "active_depth": "edit"}
+        return {
+            "item_ids": json.loads(row["item_ids_json"] or "[]"),
+            "visible_surface": str(row["visible_surface"]),
+            "active_workflow": row["active_workflow"],
+            "active_depth": str(row["active_depth"] or "edit"),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def reconcile_event_definitions(self, definitions: tuple[Any, ...]) -> None:
+        with self.transaction():
+            for definition in definitions:
+                existing = self._connection.execute(
+                    "SELECT source_hash,release_status FROM sag_event_definitions WHERE kind=?",
+                    (definition.kind,),
+                ).fetchone()
+                if (
+                    existing is not None
+                    and str(existing["release_status"]) == "released"
+                    and str(existing["source_hash"]) != definition.source_hash
+                ):
+                    raise RuntimeError(f"released runtime event schema drift: {definition.kind}")
+                self._connection.execute(
+                    """INSERT INTO sag_event_definitions(
+                         kind,version,json_schema,source_hash,release_status,retention_class,reconciled_at
+                       ) VALUES (?,?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET
+                         version=excluded.version,json_schema=excluded.json_schema,
+                         source_hash=excluded.source_hash,release_status=excluded.release_status,
+                         retention_class=excluded.retention_class,reconciled_at=excluded.reconciled_at""",
+                    (
+                        definition.kind, definition.version,
+                        json.dumps(definition.json_schema, sort_keys=True), definition.source_hash,
+                        definition.release_status, definition.retention_class, utc_now(),
+                    ),
+                )
+
+    def append_runtime_event(
+        self, *, event_id: str, workspace_id: str, project_id: str, sequence_id: str,
+        revision: int, actor: str, session_id: str | None, kind: str,
+        trace_id: str | None, payload: dict[str, Any], created_at: str, expires_at: str,
+    ) -> dict[str, Any]:
+        with self._write():
+            if self._connection.execute(
+                "SELECT 1 FROM sag_event_definitions WHERE kind=?", (kind,)
+            ).fetchone() is None:
+                raise RuntimeError(f"runtime event kind must be registered before emit: {kind}")
+            self._connection.execute(
+                """INSERT INTO sag_runtime_events(
+                     event_id,workspace_id,project_id,sequence_id,revision,actor,session_id,
+                     kind,trace_id,payload_json,created_at,expires_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event_id, workspace_id, project_id, sequence_id, revision, actor,
+                    session_id, kind, trace_id, json.dumps(payload, sort_keys=True), created_at, expires_at,
+                ),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM sag_runtime_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+        return self._runtime_event_dict(row)
+
+    @staticmethod
+    def _runtime_event_dict(row: Any) -> dict[str, Any]:
+        return {
+            "cursor": int(row["cursor"]), "event_id": str(row["event_id"]),
+            "workspace_id": str(row["workspace_id"]), "project_id": str(row["project_id"]),
+            "sequence_id": str(row["sequence_id"]), "revision": int(row["revision"]),
+            "actor": str(row["actor"]), "session_id": row["session_id"],
+            "kind": str(row["kind"]), "trace_id": row["trace_id"],
+            "payload": json.loads(row["payload_json"] or "{}"),
+            "created_at": str(row["created_at"]), "expires_at": str(row["expires_at"]),
+        }
+
+    def list_runtime_events(
+        self, project_id: str, *, after_cursor: int = 0, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT * FROM sag_runtime_events
+                   WHERE project_id=? AND cursor>? ORDER BY cursor LIMIT ?""",
+                (project_id, after_cursor, limit),
+            ).fetchall()
+            return [self._runtime_event_dict(row) for row in rows]
+
+    def runtime_cursor_bounds(self, project_id: str) -> tuple[int | None, int | None]:
+        row = self._connection.execute(
+            "SELECT MIN(cursor) AS oldest,MAX(cursor) AS newest FROM sag_runtime_events WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        return (
+            int(row["oldest"]) if row and row["oldest"] is not None else None,
+            int(row["newest"]) if row and row["newest"] is not None else None,
+        )
+
+    def prune_runtime_events(self, project_id: str, *, max_events: int = 50_000) -> int:
+        removed = 0
+        with self._write():
+            cursor = self._connection.execute(
+                "DELETE FROM sag_runtime_events WHERE project_id=? AND expires_at<?",
+                (project_id, utc_now()),
+            )
+            removed += max(0, int(getattr(cursor, "rowcount", 0) or 0))
+            boundary = self._connection.execute(
+                """SELECT cursor FROM sag_runtime_events WHERE project_id=?
+                   ORDER BY cursor DESC LIMIT 1 OFFSET ?""",
+                (project_id, max_events - 1),
+            ).fetchone()
+            if boundary is not None:
+                cursor = self._connection.execute(
+                    "DELETE FROM sag_runtime_events WHERE project_id=? AND cursor<?",
+                    (project_id, int(boundary["cursor"])),
+                )
+                removed += max(0, int(getattr(cursor, "rowcount", 0) or 0))
+        return removed
+
+    def reconcile_journal_kinds(self, definitions: tuple[dict[str, Any], ...]) -> None:
+        with self.transaction():
+            for definition in definitions:
+                existing = self._connection.execute(
+                    "SELECT source_hash,release_status FROM sag_journal_kind_definitions WHERE kind=?",
+                    (definition["kind"],),
+                ).fetchone()
+                if (
+                    existing is not None
+                    and str(existing["release_status"]) == "released"
+                    and str(existing["source_hash"]) != definition["source_hash"]
+                ):
+                    raise RuntimeError(f"released journal kind drift: {definition['kind']}")
+                self._connection.execute(
+                    """INSERT INTO sag_journal_kind_definitions(
+                         kind,version,protocol,release_status,source_hash,reconciled_at
+                       ) VALUES (?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET
+                         version=excluded.version,protocol=excluded.protocol,
+                         release_status=excluded.release_status,source_hash=excluded.source_hash,
+                         reconciled_at=excluded.reconciled_at""",
+                    (
+                        definition["kind"], definition["version"], definition["protocol"],
+                        definition["release_status"], definition["source_hash"], utc_now(),
+                    ),
+                )
+
+    def journal_kind_registered(self, kind: str) -> bool:
+        return self._connection.execute(
+            "SELECT 1 FROM sag_journal_kind_definitions WHERE kind=?", (kind,)
+        ).fetchone() is not None
+
+    @staticmethod
+    def _journal_entry_dict(row: Any) -> dict[str, Any]:
+        return {
+            "namespace": str(row["namespace"]), "seq": int(row["seq"]) if row["seq"] is not None else None,
+            "prev_hash": row["prev_hash"], "row_hash": row["row_hash"], "hash_alg": row["hash_alg"],
+            "id": str(row["id"]), "kind": str(row["kind"]), "content": str(row["content"]),
+            "session_id": row["session_id"], "batch": row["batch"],
+            "tags": json.loads(row["tags_json"] or "[]"),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "method": str(row["method"]), "schema_version": int(row["schema_version"]),
+            "created_at": str(row["created_at"]),
+        }
+
+    def get_journal_entry(self, namespace: str, entry_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT * FROM sag_journal_entries WHERE namespace=? AND id=?", (namespace, entry_id)
+        ).fetchone()
+        return self._journal_entry_dict(row) if row is not None else None
+
+    def get_journal_head_for_update(self, namespace: str, hash_alg: str) -> tuple[int, str | None, str]:
+        self._connection.execute(
+            """INSERT INTO sag_journal_streams(namespace,head_seq,head_hash,hash_alg,updated_at)
+               VALUES (?,0,NULL,?,?) ON CONFLICT(namespace) DO NOTHING""",
+            (namespace, hash_alg, utc_now()),
+        )
+        row = self._connection.execute(
+            "SELECT head_seq,head_hash,hash_alg FROM sag_journal_streams WHERE namespace=?", (namespace,)
+        ).fetchone()
+        return int(row["head_seq"]), row["head_hash"], str(row["hash_alg"])
+
+    def insert_journal_entry(self, row: dict[str, Any]) -> dict[str, Any]:
+        self._connection.execute(
+            """INSERT INTO sag_journal_entries(
+                 namespace,seq,id,prev_hash,row_hash,hash_alg,kind,content,session_id,batch,
+                 tags_json,metadata_json,method,schema_version,created_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                row["namespace"], row["seq"], row["id"], row["prev_hash"], row["row_hash"],
+                row["hash_alg"], row["kind"], row["content"], row.get("session_id"), row.get("batch"),
+                json.dumps(row.get("tags", [])), json.dumps(row.get("metadata", {})),
+                row["method"], row["schema_version"], row["created_at"],
+            ),
+        )
+        return self.get_journal_entry(row["namespace"], row["id"])
+
+    def advance_journal_head(self, namespace: str, seq: int, row_hash: str, hash_alg: str) -> None:
+        cursor = self._connection.execute(
+            """UPDATE sag_journal_streams SET head_seq=?,head_hash=?,hash_alg=?,updated_at=?
+               WHERE namespace=? AND head_seq=?""",
+            (seq, row_hash, hash_alg, utc_now(), namespace, seq - 1),
+        )
+        if int(getattr(cursor, "rowcount", 0) or 0) != 1:
+            raise RuntimeError("journal head changed during append")
+
+    def list_journal_entries(
+        self, namespace: str, *, limit: int = 200, include_unchained: bool = True,
+    ) -> list[dict[str, Any]]:
+        predicate = "namespace=?" if include_unchained else "namespace=? AND seq IS NOT NULL"
+        rows = self._connection.execute(
+            f"""SELECT * FROM sag_journal_entries WHERE {predicate}
+                ORDER BY CASE WHEN seq IS NULL THEN 1 ELSE 0 END,seq,created_at,id LIMIT ?""",
+            (namespace, max(1, limit)),
+        ).fetchall()
+        return [self._journal_entry_dict(row) for row in rows]
+
+    def count_unchained_journal_entries(self, namespace: str) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS value FROM sag_journal_entries WHERE namespace=? AND seq IS NULL", (namespace,)
+        ).fetchone()
+        return int(row["value"])
+
+    @staticmethod
+    def _provider_connection_summary(row: Any) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]), "workspace_id": str(row["workspace_id"]),
+            "provider": str(row["provider"]), "purpose": str(row["purpose"]),
+            "display_name": str(row["display_name"]), "state": str(row["state"]),
+            "scopes": json.loads(row["scopes_json"] or "[]"),
+            "secret_fingerprint": str(row["secret_fingerprint"]),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "created_at": str(row["created_at"]), "updated_at": str(row["updated_at"]),
+        }
+
+    def list_provider_connections(self, workspace_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT * FROM provider_connections WHERE workspace_id=? ORDER BY updated_at DESC,id",
+            (workspace_id,),
+        ).fetchall()
+        return [self._provider_connection_summary(row) for row in rows]
+
+    def get_provider_connection_secret(self, workspace_id: str, connection_id: str) -> dict[str, Any]:
+        row = self._connection.execute(
+            "SELECT * FROM provider_connections WHERE workspace_id=? AND id=?",
+            (workspace_id, connection_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(connection_id)
+        value = self._provider_connection_summary(row)
+        value.update({
+            "encrypted_secret": str(row["encrypted_secret"]),
+            "kms_key_version": str(row["kms_key_version"]),
+        })
+        return value
+
+    def put_provider_connection(
+        self, *, connection_id: str, workspace_id: str, provider: str, purpose: str,
+        display_name: str, state: str, scopes: list[str], encrypted_secret: str,
+        kms_key_version: str, secret_fingerprint: str, metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._write():
+            self._connection.execute(
+                """INSERT INTO provider_connections(
+                     id,workspace_id,provider,purpose,display_name,state,scopes_json,
+                     encrypted_secret,kms_key_version,secret_fingerprint,metadata_json,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                     provider=excluded.provider,purpose=excluded.purpose,display_name=excluded.display_name,
+                     state=excluded.state,scopes_json=excluded.scopes_json,
+                     encrypted_secret=excluded.encrypted_secret,kms_key_version=excluded.kms_key_version,
+                     secret_fingerprint=excluded.secret_fingerprint,metadata_json=excluded.metadata_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    connection_id, workspace_id, provider, purpose, display_name, state,
+                    json.dumps(sorted(set(scopes))), encrypted_secret, kms_key_version,
+                    secret_fingerprint, json.dumps(metadata, sort_keys=True), now, now,
+                ),
+            )
+        return self.get_provider_connection_secret(workspace_id, connection_id)
+
+    def revoke_provider_connection(self, workspace_id: str, connection_id: str) -> dict[str, Any]:
+        with self._write():
+            cursor = self._connection.execute(
+                "UPDATE provider_connections SET state='revoked',updated_at=? WHERE workspace_id=? AND id=?",
+                (utc_now(), workspace_id, connection_id),
+            )
+            if not int(getattr(cursor, "rowcount", 0) or 0):
+                raise KeyError(connection_id)
+        return self.get_provider_connection_secret(workspace_id, connection_id)
+
+    def put_delivery_profile(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        created_at = row.get("created_at", now)
+        updated_at = row.get("updated_at", created_at)
+        with self._write():
+            self._connection.execute(
+                """INSERT INTO delivery_profiles(
+                     id,project_id,destination,aspect_ratio,width,height,caption_placement,
+                     safe_zone_x,safe_zone_y,metadata_json,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,destination) DO UPDATE SET
+                     aspect_ratio=excluded.aspect_ratio,width=excluded.width,height=excluded.height,
+                     caption_placement=excluded.caption_placement,safe_zone_x=excluded.safe_zone_x,
+                     safe_zone_y=excluded.safe_zone_y,metadata_json=excluded.metadata_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    row["id"], row["project_id"], row["destination"], row["aspect_ratio"],
+                    row["width"], row["height"], row["caption_placement"], row["safe_zone_x"],
+                    row["safe_zone_y"], json.dumps(row.get("metadata", {}), sort_keys=True), created_at, updated_at,
+                ),
+            )
+        return next(entry for entry in self.list_delivery_profiles(row["project_id"]) if entry["destination"] == row["destination"])
+
+    def list_delivery_profiles(self, project_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT * FROM delivery_profiles WHERE project_id=? ORDER BY destination,id", (project_id,)
+        ).fetchall()
+        return [{
+            "id": str(row["id"]), "project_id": str(row["project_id"]),
+            "destination": str(row["destination"]), "aspect_ratio": str(row["aspect_ratio"]),
+            "width": int(row["width"]), "height": int(row["height"]),
+            "caption_placement": str(row["caption_placement"]),
+            "safe_zone_x": int(row["safe_zone_x"]), "safe_zone_y": int(row["safe_zone_y"]),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "created_at": str(row["created_at"]), "updated_at": str(row["updated_at"]),
+        } for row in rows]
+
+    @staticmethod
+    def _release_approval_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]), "workspace_id": str(row["workspace_id"]),
+            "project_id": str(row["project_id"]), "project_revision": int(row["project_revision"]),
+            "bundle_hash": str(row["bundle_hash"]),
+            "artifact_hashes": json.loads(row["artifact_hashes_json"] or "[]"),
+            "destinations": json.loads(row["destinations_json"] or "[]"),
+            "state": str(row["state"]), "approved_by": str(row["approved_by"]),
+            "expires_at": str(row["expires_at"]), "consumed_at": row["consumed_at"],
+            "created_at": str(row["created_at"]),
+        }
+
+    def put_release_approval(self, row: dict[str, Any]) -> dict[str, Any]:
+        with self._write():
+            self._connection.execute(
+                """INSERT INTO release_approvals(
+                     id,workspace_id,project_id,project_revision,bundle_hash,artifact_hashes_json,
+                     destinations_json,state,approved_by,expires_at,consumed_at,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,bundle_hash) DO NOTHING""",
+                (
+                    row["id"], row["workspace_id"], row["project_id"], row["project_revision"],
+                    row["bundle_hash"], json.dumps(row["artifact_hashes"], sort_keys=True),
+                    json.dumps(row["destinations"], sort_keys=True), row["state"], row["approved_by"],
+                    row["expires_at"], row.get("consumed_at"), row["created_at"],
+                ),
+            )
+        existing = self._connection.execute(
+            "SELECT * FROM release_approvals WHERE workspace_id=? AND bundle_hash=?",
+            (row["workspace_id"], row["bundle_hash"]),
+        ).fetchone()
+        return self._release_approval_dict(existing)
+
+    def get_release_approval(self, project_id: str, approval_id: str) -> dict[str, Any]:
+        row = self._connection.execute(
+            "SELECT * FROM release_approvals WHERE project_id=? AND id=?", (project_id, approval_id)
+        ).fetchone()
+        if row is None:
+            raise KeyError(approval_id)
+        return self._release_approval_dict(row)
+
+    def list_release_approvals(self, project_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT * FROM release_approvals WHERE project_id=? ORDER BY created_at DESC,id", (project_id,)
+        ).fetchall()
+        return [self._release_approval_dict(row) for row in rows]
+
+    def consume_release_approval(self, project_id: str, approval_id: str) -> dict[str, Any]:
+        with self._write():
+            cursor = self._connection.execute(
+                """UPDATE release_approvals SET state='consumed',consumed_at=?
+                   WHERE project_id=? AND id=? AND state='active'""",
+                (utc_now(), project_id, approval_id),
+            )
+            if not int(getattr(cursor, "rowcount", 0) or 0):
+                raise ValueError("release approval is not active")
+        return self.get_release_approval(project_id, approval_id)
+
+    @staticmethod
+    def _release_attempt_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]), "workspace_id": str(row["workspace_id"]),
+            "project_id": str(row["project_id"]), "approval_id": str(row["approval_id"]),
+            "destination": str(row["destination"]), "idempotency_key": str(row["idempotency_key"]),
+            "state": str(row["state"]), "external_id": row["external_id"],
+            "bounded_error": row["bounded_error"], "attempt": int(row["attempt"]),
+            "created_at": str(row["created_at"]), "updated_at": str(row["updated_at"]),
+        }
+
+    def put_release_attempt(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        created_at = row.get("created_at", now)
+        updated_at = row.get("updated_at", created_at)
+        with self._write():
+            self._connection.execute(
+                """INSERT INTO release_publication_attempts(
+                     id,workspace_id,project_id,approval_id,destination,idempotency_key,state,
+                     external_id,bounded_error,attempt,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(approval_id,destination) DO NOTHING""",
+                (
+                    row["id"], row["workspace_id"], row["project_id"], row["approval_id"],
+                    row["destination"], row["idempotency_key"], row["state"], row.get("external_id"),
+                    row.get("bounded_error"), row.get("attempt", 0), created_at, updated_at,
+                ),
+            )
+        existing = self._connection.execute(
+            "SELECT * FROM release_publication_attempts WHERE approval_id=? AND destination=?",
+            (row["approval_id"], row["destination"]),
+        ).fetchone()
+        return self._release_attempt_dict(existing)
+
+    def list_release_attempts(self, project_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT * FROM release_publication_attempts WHERE project_id=? ORDER BY created_at DESC,id",
+            (project_id,),
+        ).fetchall()
+        return [self._release_attempt_dict(row) for row in rows]
+
+    def list_jobs(self, project_id: str, limit: int = 200) -> list[JobRecord]:
+        rows = self._connection.execute(
+            "SELECT * FROM jobs WHERE project_id=? ORDER BY created_at DESC,id LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+        return [self._job_record(row) for row in rows]
+
+    def list_artifacts(self, project_id: str, limit: int = 200) -> list[ArtifactRecord]:
+        rows = self._connection.execute(
+            "SELECT * FROM artifacts WHERE project_id=? ORDER BY created_at DESC,id LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+        return [self._artifact_record(row) for row in rows]
+
+    @staticmethod
+    def arguments_hash(arguments: dict[str, Any]) -> str:
+        return hashlib.sha256(json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def create_confirmation(
+        self, project_id: str, command: str, arguments: dict[str, Any], expected_revision: int, confirmed_by: str,
+    ) -> dict[str, str]:
+        confirmation_id = f"confirm_{uuid4().hex[:16]}"
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(minutes=10)
+        with self._write():
+            self._connection.execute(
+                """INSERT INTO action_confirmations(
+                     id,project_id,command,arguments_hash,expected_revision,confirmed_by,expires_at,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?)""",
+                (confirmation_id, project_id, command, self.arguments_hash(arguments), expected_revision,
+                 confirmed_by, expires.isoformat(), now.isoformat()),
+            )
+        return {"id": confirmation_id, "expires_at": expires.isoformat()}
+
+    def consume_confirmation(
+        self, confirmation_id: str | None, project_id: str, command: str,
+        arguments: dict[str, Any], expected_revision: int,
+    ) -> bool:
+        if not confirmation_id:
+            return False
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT * FROM action_confirmations WHERE id=?", (confirmation_id,)
+            ).fetchone()
+            if row is None or row["consumed_at"]:
+                return False
+            if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+                return False
+            valid = (
+                row["project_id"] == project_id and row["command"] == command
+                and int(row["expected_revision"]) == expected_revision
+                and row["arguments_hash"] == self.arguments_hash(arguments)
+            )
+            if valid:
+                self._connection.execute(
+                    "UPDATE action_confirmations SET consumed_at=? WHERE id=?",
+                    (utc_now(), confirmation_id),
+                )
+            return bool(valid)
 
     @staticmethod
     def _job_record(row: sqlite3.Row) -> JobRecord:
@@ -565,6 +1140,8 @@ class Store:
             asset_id=row["asset_id"], kind=row["kind"], managed_uri=row["managed_uri"],
             sha256=row["sha256"], byte_size=int(row["byte_size"]), mime_type=row["mime_type"],
             provenance=json.loads(row["provenance_json"]),
+            storage_backend=row["storage_backend"], storage_namespace=row["storage_namespace"],
+            storage_key=row["storage_key"], storage_version=row["storage_version"],
         )
 
     def create_artifact(self, record: ArtifactRecord) -> ArtifactRecord:
@@ -572,12 +1149,15 @@ class Store:
             self._connection.execute(
                 """INSERT INTO artifacts(
                      id,project_id,job_id,asset_id,kind,managed_uri,sha256,byte_size,
-                     mime_type,provenance_json,created_at
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                     mime_type,provenance_json,storage_backend,storage_namespace,
+                     storage_key,storage_version,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     record.id, record.project_id, record.job_id, record.asset_id,
                     record.kind, record.managed_uri, record.sha256, record.byte_size,
-                    record.mime_type, json.dumps(record.provenance, sort_keys=True), utc_now(),
+                    record.mime_type, json.dumps(record.provenance, sort_keys=True),
+                    record.storage_backend, record.storage_namespace, record.storage_key,
+                    record.storage_version, utc_now(),
                 ),
             )
         return self.get_artifact(record.id)
@@ -682,16 +1262,20 @@ class Store:
             id=row["id"], sha256=row["sha256"], byte_size=int(row["byte_size"]),
             mime_type=row["mime_type"], storage_project_id=row["storage_project_id"],
             storage_asset_id=row["storage_asset_id"], storage_kind=row["storage_kind"],
+            storage_backend=row["storage_backend"], storage_namespace=row["storage_namespace"],
+            storage_key=row["storage_key"], storage_version=row["storage_version"],
         )
 
     def register_media_blob(self, record: MediaBlobRecord) -> MediaBlobRecord:
         with self._write():
             self._connection.execute(
                 """INSERT INTO media_blobs(
-                     id,sha256,byte_size,mime_type,storage_project_id,storage_asset_id,storage_kind,created_at
-                   ) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sha256) DO NOTHING""",
+                     id,sha256,byte_size,mime_type,storage_project_id,storage_asset_id,storage_kind,
+                     storage_backend,storage_namespace,storage_key,storage_version,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sha256) DO NOTHING""",
                 (record.id,record.sha256,record.byte_size,record.mime_type,record.storage_project_id,
-                 record.storage_asset_id,record.storage_kind,utc_now()),
+                 record.storage_asset_id,record.storage_kind,record.storage_backend,
+                 record.storage_namespace,record.storage_key,record.storage_version,utc_now()),
             )
             row = self._connection.execute("SELECT * FROM media_blobs WHERE sha256=?", (record.sha256,)).fetchone()
         assert row is not None

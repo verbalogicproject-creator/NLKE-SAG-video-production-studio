@@ -1,0 +1,829 @@
+'use client';
+
+import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import { Component, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Activity, Bot, Box, Camera, Captions, ChevronDown, CirclePlay, EyeOff, Film, Image as ImageIcon,
+  Layers3, Link2, LoaderCircle, Mic2, MonitorPlay, MoreHorizontal, Pause, Play, Plus,
+  Redo2, Scissors, Search, Settings2, SlidersHorizontal, Split, Square, Trash2,
+  Undo2, Upload, Volume2, WandSparkles, Wifi, WifiOff, X,
+} from 'lucide-react';
+import { CaptureSpool, CompletedCapture, createCaptureSpool, recoverCaptureSpools } from './capture-spool';
+import { DirectorPanel } from './DirectorPanel';
+
+const SpatialCanvas = dynamic(() => import('./SpatialCanvas'), { ssr: false });
+
+const TICKS = 120_000;
+const MAX_DURATION = 180 * TICKS;
+
+type Asset = {
+  id: string; name: string; kind: string; intake_status: string; duration_ticks?: number | null;
+  proxy_asset_id?: string | null; thumbnail_asset_id?: string | null; managed_uri?: string | null;
+  parent_asset_id?: string | null;
+};
+type Item = {
+  id: string; kind: string; track_id: string; name: string; start_ticks: number; duration_ticks: number;
+  asset_id?: string | null; text?: string | null; gain_db?: number; muted?: boolean; x?: number; y?: number;
+  scale?: number; opacity?: number; fit_mode?: string; caption_style?: { preset: string; position: string } | null;
+};
+type Track = { id: string; kind: string; name: string; items: Item[] };
+type Project = {
+  id: string; name: string; revision: number; duration_ticks: number;
+  canvas: { width: number; height: number }; assets: Asset[]; tracks: Track[];
+};
+type Receipt = {
+  id: string; command: string; status: string; actor: string; project_revision: number;
+  created_at: string; payload?: Record<string, any>;
+};
+type MobilePane = 'media' | 'monitor' | 'timeline' | 'inspector';
+type StudioDepth = 'edit' | 'context' | 'system';
+type SpatialEntity = {
+  id: string; kind: string; label: string; parent_id?: string | null; semantic_layer: string;
+  revision: number; state: Record<string, any>; metadata: Record<string, any>;
+  eligible_action_ids: string[]; position: { x: number; y: number; z: number };
+  bounds: { width: number; height: number; depth: number };
+};
+type SpatialSnapshot = {
+  canonical_revision: number; runtime_cursor: number; projection_hash: string;
+  entities: SpatialEntity[]; edges: Array<{ id: string; source: string; target: string; relationship_kind: string }>;
+  focus: string[]; truncation: { truncated: boolean; omitted_entities: number; omitted_edges: number };
+};
+
+function seconds(ticks: number) { return ticks / TICKS; }
+function timecode(ticks: number) {
+  const total = Math.max(0, Math.floor(seconds(ticks)));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+export function Studio({
+  controlProject, initialProject, initialContext, initialCatalog, initialReceipts, initialSpatial, initialDelivery,
+}: {
+  controlProject: {
+    id: string; name: string;
+    sequences?: Array<{
+      id?: string;
+      deliveryProfiles?: Array<Record<string, any>>;
+      releaseApprovals?: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }>;
+    }>;
+  };
+  initialProject: Project;
+  initialContext: any;
+  initialCatalog: any;
+  initialReceipts: Receipt[];
+  initialSpatial: SpatialSnapshot;
+  initialDelivery: { delivery_profiles: Array<Record<string, any>>; release_approvals: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }> };
+}) {
+  const [project, setProject] = useState(initialProject);
+  const [context, setContext] = useState(initialContext);
+  const [catalog, setCatalog] = useState(initialCatalog);
+  const [receipts, setReceipts] = useState<Receipt[]>(initialReceipts ?? []);
+  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(
+    initialContext?.shared_focus?.[0]?.id ?? initialProject.tracks.flatMap((track) => track.items)[0]?.id ?? null,
+  );
+  const [mobilePane, setMobilePane] = useState<MobilePane>('monitor');
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [directorOpen, setDirectorOpen] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [pairCode, setPairCode] = useState('');
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const [depth, setDepth] = useState<StudioDepth>('edit');
+  const [spatial, setSpatial] = useState<SpatialSnapshot>(initialSpatial);
+  const [delivery, setDelivery] = useState(initialDelivery);
+  const [show3d, setShow3d] = useState(false);
+  const [spatialPaused, setSpatialPaused] = useState(false);
+  const [runtimeConnection, setRuntimeConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const seenRuntimeEvents = useRef(new Set<string>());
+  const [playing, setPlaying] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  const items = useMemo(() => project.tracks.flatMap((track) => track.items), [project]);
+  const selected = items.find((item) => item.id === selectedId) ?? null;
+  const selectedAsset = selected?.asset_id ? project.assets.find((asset) => asset.id === selected.asset_id) : null;
+  const eligible = new Set((catalog?.eligibility ?? []).filter((entry: any) => entry.eligible).map((entry: any) => entry.name));
+  const selectedSpatial = spatial.entities.find((entity) => entity.id === selectedId) ?? null;
+
+  async function fetchSpatial(nextDepth: StudioDepth = depth, focusId: string | null = selectedId) {
+    const query = new URLSearchParams({ depth: nextDepth, hop_count: nextDepth === 'system' ? '6' : '2' });
+    if (focusId) query.set('focus_id', focusId);
+    const response = await fetch(`/api/projects/${controlProject.id}/studio/spatial?${query}`, { cache: 'no-store' });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message ?? body.error ?? 'Spatial context failed');
+    setSpatial(body);
+    return body as SpatialSnapshot;
+  }
+
+  function changeDepth(nextDepth: StudioDepth) {
+    setDepth(nextDepth);
+    window.localStorage.setItem(`sag-studio-depth:${controlProject.id}`, nextDepth);
+    if (nextDepth !== 'edit') void fetchSpatial(nextDepth).catch((cause) => setError(cause instanceof Error ? cause.message : 'Spatial context failed'));
+  }
+
+  async function refresh(silent = false) {
+    if (!silent) setBusy('refresh');
+    const response = await fetch(`/api/projects/${controlProject.id}/studio`, { cache: 'no-store' });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message ?? body.error ?? 'Studio refresh failed');
+    setProject(body.project); setContext(body.context); setCatalog(body.catalog);
+    setReceipts(body.receipts?.receipts ?? body.receipts ?? []);
+    setSuggestions(body.suggestions?.suggestions ?? []);
+    if (body.spatial && depth !== 'edit') setSpatial(body.spatial);
+    if (body.delivery) setDelivery(body.delivery);
+    if (!silent) setBusy('');
+  }
+
+  useEffect(() => {
+    const timer = window.setInterval(() => { void refresh(true).catch(() => undefined); }, 2500);
+    return () => window.clearInterval(timer);
+  }, [controlProject.id]);
+
+  useEffect(() => {
+    const savedDepth = window.localStorage.getItem(`sag-studio-depth:${controlProject.id}`);
+    if (savedDepth === 'edit' || savedDepth === 'context' || savedDepth === 'system') setDepth(savedDepth);
+    setSpatialPaused(window.localStorage.getItem(`sag-spatial-paused:${controlProject.id}`) === '1');
+    setShow3d(window.matchMedia('(min-width: 768px) and (orientation: landscape)').matches);
+    setDirectorOpen(window.localStorage.getItem(`sag-director-open:${controlProject.id}`) === '1');
+  }, [controlProject.id]);
+
+  useEffect(() => {
+    if (depth !== 'edit') void fetchSpatial(depth).catch(() => undefined);
+  }, [depth, project.revision, selectedId]);
+
+  useEffect(() => {
+    const storedCursor = window.sessionStorage.getItem(`sag-runtime-cursor:${controlProject.id}`) ?? '0';
+    const source = new EventSource(`/api/projects/${controlProject.id}/studio/runtime?cursor=${encodeURIComponent(storedCursor)}`);
+    source.onopen = () => setRuntimeConnection('connected');
+    source.onerror = () => setRuntimeConnection('disconnected');
+
+    async function acknowledge(directive: any, success: boolean, findings: Array<Record<string, unknown>> = []) {
+      await fetch(`/api/projects/${controlProject.id}/studio/spatial`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          operation: 'ack', receiptId: directive.receipt_id,
+          acknowledgement: {
+            consumer_id: `studio:${controlProject.id}`,
+            projection_hash: directive.expected_projection_hash,
+            observed_target_ids: success ? directive.target_ids : [],
+            active_depth: depth, renderer_mode: show3d ? 'webgl' : 'dom_tree', findings, success,
+          },
+        }),
+      });
+    }
+
+    function onDirective(message: MessageEvent<string>) {
+      let event: any;
+      try { event = JSON.parse(message.data); } catch { return; }
+      if (!event?.event_id || seenRuntimeEvents.current.has(event.event_id)) return;
+      seenRuntimeEvents.current.add(event.event_id);
+      if (seenRuntimeEvents.current.size > 500) seenRuntimeEvents.current.delete(seenRuntimeEvents.current.values().next().value!);
+      window.sessionStorage.setItem(`sag-runtime-cursor:${controlProject.id}`, String(event.cursor));
+      const directive = event.payload?.directive;
+      if (!directive) return;
+      if (spatialPaused) {
+        void acknowledge(directive, false, [{ code: 'agent_spatial_paused', summary: 'Browser spatial directives are paused.' }]);
+        return;
+      }
+      const targetId = directive.target_ids?.[0] ?? null;
+      if (targetId) setSelectedId(targetId);
+      if (directive.action === 'spatial.set_depth') {
+        const requested = directive.intended_observed_effect?.active_depth;
+        changeDepth(requested === 'edit' || requested === 'system' ? requested : 'context');
+      } else if (directive.action === 'spatial.reset_view') {
+        setShow3d(window.matchMedia('(min-width: 768px) and (orientation: landscape)').matches);
+      } else if (directive.action !== 'spatial.focus_entity' && directive.action !== 'spatial.frame_entity') {
+        changeDepth(directive.action === 'spatial.reveal_blast_radius' ? 'system' : 'context');
+      }
+      void fetchSpatial(depth, targetId).then(() => acknowledge(directive, true)).catch((cause) => {
+        void acknowledge(directive, false, [{ code: 'projection_failed', summary: cause instanceof Error ? cause.message : 'Projection failed.' }]);
+      });
+    }
+
+    source.addEventListener('spatial.directive.dispatched', onDirective as EventListener);
+    source.addEventListener('snapshot_required', () => { void fetchSpatial(depth).catch(() => undefined); });
+    source.addEventListener('receipt.transitioned', () => { void refresh(true).catch(() => undefined); });
+    return () => source.close();
+  }, [controlProject.id, depth, show3d, spatialPaused]);
+
+  async function operate(operation: string, payload: Record<string, unknown> = {}) {
+    setBusy(operation); setError('');
+    try {
+      const response = await fetch(`/api/projects/${controlProject.id}/studio`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ operation, expectedRevision: project.revision, ...payload }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message ?? body.error ?? body.detail ?? 'Studio operation failed');
+      if (body.project) setProject(body.project);
+      await refresh(true);
+      return body.result;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Studio operation failed');
+      throw cause;
+    } finally { setBusy(''); }
+  }
+
+  async function command(name: string, arguments_: Record<string, unknown>, confirm = false) {
+    return operate('command', { command: name, arguments: arguments_, confirm });
+  }
+
+  async function select(item: Item) {
+    setSelectedId(item.id);
+    await operate('select', { itemIds: [item.id] });
+  }
+
+  async function selectSpatial(entityId: string) {
+    setSelectedId(entityId);
+    const item = items.find((entry) => entry.id === entityId);
+    if (item) await operate('select', { itemIds: [item.id] });
+  }
+
+  async function pair() {
+    const result = await operate('pair');
+    setPairCode(String(result.code));
+  }
+
+  async function upload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy('upload'); setError('');
+    try {
+      const response = await fetch(`/api/projects/${controlProject.id}/assets/upload`, {
+        method: 'POST', body: new FormData(event.currentTarget),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message ?? body.error ?? 'Upload failed');
+      event.currentTarget.reset();
+      await refresh(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Upload failed');
+    } finally { setBusy(''); }
+  }
+
+  async function deleteSelected() {
+    if (!selected || !window.confirm(`Delete ${selected.name} from this sequence?`)) return;
+    await command('timeline.delete_item', { item_id: selected.id }, true);
+    setSelectedId(null);
+  }
+
+  const mediaUrl = selectedAsset?.managed_uri
+    ? `/api/projects/${controlProject.id}/studio/assets/${selectedAsset.id}/${selectedAsset.proxy_asset_id ? 'proxy' : 'content'}`
+    : null;
+
+  return <div className="studio-root">
+    <header className="studio-header">
+      <div className="flex min-w-0 items-center gap-3">
+        <Link href="/dashboard" className="studio-mark" aria-label="Back to projects"><Film size={19} /></Link>
+        <div className="min-w-0">
+          <div className="truncate text-[13px] font-medium text-ink-0">{controlProject.name}</div>
+          <div className="font-mono text-[10px] text-ink-2">REV {project.revision} / {project.canvas.width}×{project.canvas.height}</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <div className="studio-depth-switch" role="group" aria-label="Studio depth">
+          {(['edit', 'context', 'system'] as const).map((value) => <button
+            key={value} className={depth === value ? 'active' : ''} aria-pressed={depth === value}
+            onClick={() => changeDepth(value)}>{value.charAt(0).toUpperCase() + value.slice(1)}</button>)}
+        </div>
+        <button className="studio-button secondary" onClick={() => void command('project.undo', {})} disabled={busy !== '' || !eligible.has('project.undo')}><Undo2 size={15} /><span className="hidden sm:inline">Undo</span></button>
+        <button className="studio-button secondary hidden md:flex" onClick={() => void command('project.redo', {})} disabled={busy !== '' || !eligible.has('project.redo')}><Redo2 size={15} />Redo</button>
+        <button className="studio-button secondary" onClick={() => void pair()} disabled={busy !== ''}><Link2 size={15} /><span className="hidden sm:inline">Pair Codex</span></button>
+        <button className="studio-button director-trigger" aria-pressed={directorOpen} onClick={() => {
+          setActivityOpen(false);
+          setDirectorOpen((value) => { window.localStorage.setItem(`sag-director-open:${controlProject.id}`, value ? '0' : '1'); return !value; });
+        }}><WandSparkles size={15} /><span className="hidden sm:inline">Director</span></button>
+        <button className="studio-button primary" onClick={() => void operate('render')} disabled={busy !== ''}><CirclePlay size={15} />Render</button>
+        <button className="studio-icon-button" onClick={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); setActivityOpen((value) => !value); }} aria-label="Open governance"><Activity size={17} /></button>
+      </div>
+    </header>
+
+    {pairCode ? <div className="studio-notice" role="status">
+      <Bot size={17} /><span>Pairing code</span><strong>{pairCode}</strong><span className="text-ink-2">Scoped to this sequence for ten minutes.</span>
+      <button onClick={() => setPairCode('')} aria-label="Dismiss pairing code"><X size={15} /></button>
+    </div> : null}
+    {error ? <div className="studio-error" role="alert"><span>{error}</span><button onClick={() => setError('')}><X size={15} /></button></div> : null}
+
+    {depth === 'edit' ? <main className="studio-workspace">
+      <section className={`studio-panel studio-media ${mobilePane === 'media' ? 'mobile-active' : ''}`} aria-label="Media">
+        <PanelHeading icon={<Layers3 size={15} />} title="Media" action={<button className="studio-icon-button compact" aria-label="Search media"><Search size={14} /></button>} />
+        <div className="studio-panel-body space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <button className="studio-button secondary" onClick={() => setCaptureOpen((value) => !value)}><Camera size={14} />Capture</button>
+            <button className="studio-button secondary" onClick={() => void operate('render')}><CirclePlay size={14} />Preview</button>
+          </div>
+          {project.assets.some((asset) => !asset.parent_asset_id && asset.intake_status === 'observed_valid') ? <button
+            className="studio-button primary w-full" disabled={busy !== ''}
+            onClick={() => {
+              const source = project.assets.find((asset) => !asset.parent_asset_id && asset.intake_status === 'observed_valid');
+              if (source) void operate('analyze', { assetId: source.id });
+            }}><WandSparkles size={14} />Find short moments</button> : null}
+          {suggestions.length ? <div className="space-y-2">
+            <div className="text-[10px] font-medium text-ink-2">Suggested moments</div>
+            {suggestions.slice(0, 5).map((suggestion) => <div key={suggestion.id} className="studio-suggestion">
+              <strong>{suggestion.provenance?.hook ?? suggestion.generator_kind ?? 'Candidate'}</strong>
+              <span>{timecode(Number(suggestion.provenance?.start_ticks ?? 0))} / {timecode(Number(suggestion.provenance?.duration_ticks ?? 0))}</span>
+            </div>)}
+          </div> : null}
+          {captureOpen ? <CaptureControl projectId={controlProject.id} onComplete={() => refresh(true)} /> : null}
+          <form onSubmit={upload} className="studio-dropzone">
+            <Upload size={19} /><span>Import video or audio</span><input name="file" type="file" accept="video/*,audio/*,image/*" aria-label="Import media" />
+          </form>
+          <div className="grid grid-cols-2 gap-2">
+            {project.assets.filter((asset) => !asset.parent_asset_id).map((asset) => <button
+              key={asset.id} className="studio-media-tile" onClick={() => {
+                const existing = items.find((item) => item.asset_id === asset.id);
+                if (existing) void select(existing);
+              }}
+            >
+              <span className="studio-thumb">
+                {asset.thumbnail_asset_id ? <img src={`/api/projects/${controlProject.id}/studio/assets/${asset.id}/thumbnail`} alt="" /> : asset.kind === 'image' ? <ImageIcon size={21} /> : <Film size={21} />}
+              </span>
+              <span className="truncate text-left text-[11px] text-ink-1">{asset.name}</span>
+              <span className="font-mono text-[9px] text-ink-3">{asset.duration_ticks ? timecode(asset.duration_ticks) : asset.kind}</span>
+            </button>)}
+          </div>
+          {project.assets.length === 0 ? <EmptyState icon={<Upload size={20} />} title="No media yet" detail="Import a recording to start the cut." /> : null}
+        </div>
+      </section>
+
+      <section className={`studio-monitor ${mobilePane === 'monitor' ? 'mobile-active' : ''}`} aria-label="Program monitor">
+        <div className="studio-stage">
+          {mediaUrl && selectedAsset?.kind === 'video' ? <video ref={videoRef} src={mediaUrl} playsInline onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} /> :
+            <div className="studio-stage-empty"><MonitorPlay size={30} /><span>{selected ? selected.name : 'Select a clip to preview'}</span></div>}
+          {selected?.kind === 'title' ? <div className="studio-title-preview">{selected.text}</div> : null}
+        </div>
+        <div className="studio-transport">
+          <button className="studio-icon-button" onClick={() => {
+            const video = videoRef.current; if (!video) return;
+            if (video.paused) void video.play(); else video.pause();
+          }} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} /> : <Play size={17} />}</button>
+          <span className="font-mono text-[10px] text-ink-2">00:00 / {timecode(project.duration_ticks)}</span>
+          <div className="flex-1" />
+          <button className="studio-icon-button" aria-label="Monitor settings"><Settings2 size={16} /></button>
+        </div>
+      </section>
+
+      <aside className={`studio-panel studio-inspector ${mobilePane === 'inspector' ? 'mobile-active' : ''}`} aria-label="Inspector">
+        <PanelHeading icon={<SlidersHorizontal size={15} />} title="Inspector" />
+        <div className="studio-panel-body">
+          {selected ? <Inspector item={selected} disabled={busy !== ''} onCommand={command} onDelete={deleteSelected} /> :
+            <EmptyState icon={<SlidersHorizontal size={20} />} title="Nothing selected" detail="Choose a timeline item to edit its properties." />}
+        </div>
+      </aside>
+
+      <section className={`studio-timeline ${mobilePane === 'timeline' ? 'mobile-active' : ''}`} aria-label="Timeline">
+        <div className="studio-timeline-toolbar">
+          <div className="flex items-center gap-1">
+            <button className="studio-icon-button" title="Split selected clip" disabled={!selected || busy !== ''} onClick={() => selected && void command('timeline.split_clip', { item_id: selected.id, at_ticks: selected.start_ticks + Math.floor(selected.duration_ticks / 2) })}><Split size={16} /></button>
+            <button className="studio-icon-button" title="Delete selected item" disabled={!selected || busy !== ''} onClick={() => void deleteSelected()}><Trash2 size={16} /></button>
+          </div>
+          <div className="font-mono text-[10px] text-ink-2">MASTER / {timecode(project.duration_ticks)} / MAGNETIC PRIMARY</div>
+          <div className="flex items-center gap-1"><button className="studio-icon-button"><Scissors size={16} /></button><button className="studio-icon-button"><MoreHorizontal size={16} /></button></div>
+        </div>
+        <div className="studio-timeline-scroll">
+          <div className="studio-ruler"><span>00:00</span><span>{timecode(project.duration_ticks / 2)}</span><span>{timecode(project.duration_ticks)}</span></div>
+          {project.tracks.map((track) => <div className="studio-track" key={track.id}>
+            <div className="studio-track-label"><TrackIcon kind={track.kind} /><span>{track.name}</span></div>
+            <div className="studio-track-lane">
+              {track.items.map((item) => {
+                const left = Math.min(98, item.start_ticks / Math.max(project.duration_ticks, 1) * 100);
+                const width = Math.max(4, Math.min(100 - left, item.duration_ticks / Math.max(project.duration_ticks, 1) * 100));
+                return <button key={item.id} className={`studio-clip ${item.id === selectedId ? 'selected' : ''} ${item.kind}`}
+                  style={{ left: `${left}%`, width: `${width}%` }} onClick={() => void select(item)}>
+                  <span>{item.name}</span><small>{timecode(item.duration_ticks)}</small>
+                </button>;
+              })}
+            </div>
+          </div>)}
+        </div>
+      </section>
+    </main> : <SpatialWorkspace
+      snapshot={spatial}
+      depth={depth}
+      selectedId={selectedId}
+      selectedEntity={selectedSpatial}
+      show3d={show3d}
+      paused={spatialPaused}
+      connection={runtimeConnection}
+      onSelect={(entityId) => void selectSpatial(entityId)}
+      onToggle3d={() => setShow3d((value) => !value)}
+      onTogglePause={() => {
+        setSpatialPaused((value) => {
+          window.localStorage.setItem(`sag-spatial-paused:${controlProject.id}`, value ? '0' : '1');
+          return !value;
+        });
+      }}
+      onOpenGovernance={() => setActivityOpen(true)}
+    />}
+
+    {depth === 'edit' ? <nav className="studio-mobile-nav" aria-label="Studio panes">
+      {([
+        ['media', <Layers3 size={18} />, 'Media'], ['monitor', <MonitorPlay size={18} />, 'Preview'],
+        ['timeline', <Film size={18} />, 'Timeline'], ['inspector', <SlidersHorizontal size={18} />, 'Inspector'],
+      ] as const).map(([pane, icon, label]) => <button key={pane} className={mobilePane === pane ? 'active' : ''} onClick={() => setMobilePane(pane)}>{icon}<span>{label}</span></button>)}
+    </nav> : null}
+
+    {activityOpen ? <ActivityDrawer
+      receipts={receipts}
+      context={context}
+      delivery={delivery}
+      onClose={() => setActivityOpen(false)}
+    /> : null}
+    {directorOpen ? <DirectorPanel
+      projectId={controlProject.id}
+      sequenceId={controlProject.sequences?.[0]?.id ?? project.id}
+      projectRevision={project.revision}
+      onProjectRefresh={() => refresh(true)}
+      onClose={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); }}
+    /> : null}
+    {busy ? <div className="studio-busy" role="status"><LoaderCircle className="animate-spin" size={16} />{busy === 'refresh' ? 'Refreshing' : 'Applying change'}</div> : null}
+  </div>;
+}
+
+class SpatialErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    return this.state.failed
+      ? <div className="studio-spatial-fallback" role="alert"><Box size={24} /><strong>3D view unavailable</strong><span>Use the semantic hierarchy to continue.</span></div>
+      : this.props.children;
+  }
+}
+
+function SpatialWorkspace({
+  snapshot, depth, selectedId, selectedEntity, show3d, paused, connection,
+  onSelect, onToggle3d, onTogglePause, onOpenGovernance,
+}: {
+  snapshot: SpatialSnapshot;
+  depth: Exclude<StudioDepth, 'edit'>;
+  selectedId: string | null;
+  selectedEntity: SpatialEntity | null;
+  show3d: boolean;
+  paused: boolean;
+  connection: 'connecting' | 'connected' | 'disconnected';
+  onSelect: (id: string) => void;
+  onToggle3d: () => void;
+  onTogglePause: () => void;
+  onOpenGovernance: () => void;
+}) {
+  const byId = useMemo(() => new Map(snapshot.entities.map((entity) => [entity.id, entity])), [snapshot.entities]);
+  const breadcrumbs = useMemo(() => {
+    const result: SpatialEntity[] = [];
+    let current = selectedEntity;
+    while (current) {
+      result.unshift(current);
+      current = current.parent_id ? byId.get(current.parent_id) ?? null : null;
+    }
+    return result;
+  }, [selectedEntity, byId]);
+  const selectedRelationships = useMemo(
+    () => selectedEntity ? snapshot.edges.filter((edge) => edge.source === selectedEntity.id || edge.target === selectedEntity.id) : [],
+    [selectedEntity, snapshot.edges],
+  );
+  const webglAvailable = typeof window !== 'undefined' && 'WebGLRenderingContext' in window;
+
+  return <main className="studio-spatial-workspace" aria-label={`${depth} spatial workspace`}>
+    <div className="studio-spatial-toolbar">
+      <nav className="studio-breadcrumbs" aria-label="Semantic hierarchy">
+        {(breadcrumbs.length ? breadcrumbs : snapshot.entities.slice(0, 3)).map((entity, index) => <span key={entity.id}>
+          {index ? <span aria-hidden="true">/</span> : null}
+          <button onClick={() => onSelect(entity.id)}>{entity.label}</button>
+        </span>)}
+      </nav>
+      <div className="flex items-center gap-1.5">
+        <span className={`studio-runtime-state ${connection}`} role="status">
+          {connection === 'connected' ? <Wifi size={13} /> : <WifiOff size={13} />}
+          {connection === 'connected' ? 'Live runtime' : connection === 'connecting' ? 'Connecting' : 'Reconnect pending'}
+        </span>
+        <button className="studio-button secondary" onClick={onTogglePause} aria-pressed={paused}>
+          <EyeOff size={14} />{paused ? 'Resume Codex view' : 'Pause Codex view'}
+        </button>
+        <button className="studio-button secondary" onClick={onToggle3d} disabled={!webglAvailable} aria-pressed={show3d}>
+          <Box size={14} />{show3d ? 'Show tree' : 'Open 3D'}
+        </button>
+      </div>
+    </div>
+
+    <section className="studio-semantic-explorer" aria-label="Semantic explorer">
+      <PanelHeading icon={<Layers3 size={15} />} title="Hierarchy" />
+      <HierarchyTree entities={snapshot.entities} selectedId={selectedId} onSelect={onSelect} />
+    </section>
+
+    <section className="studio-spatial-view" aria-label={`${depth} projection`}>
+      {show3d && webglAvailable ? <SpatialErrorBoundary>
+        <SpatialCanvas
+          entities={snapshot.entities}
+          edges={snapshot.edges}
+          selectedId={selectedId}
+          onSelect={onSelect}
+        />
+      </SpatialErrorBoundary> : <div className="studio-spatial-summary">
+        <div>
+          <strong>{depth === 'context' ? 'Focused causal neighborhood' : 'Production lifecycle'}</strong>
+          <span>{snapshot.entities.length} entities and {snapshot.edges.length} relationships</span>
+        </div>
+        <HierarchyTree entities={snapshot.entities} selectedId={selectedId} onSelect={onSelect} compact />
+      </div>}
+      {snapshot.truncation.truncated ? <div className="studio-spatial-truncation" role="status">
+        Bounded view: {snapshot.truncation.omitted_entities} entities and {snapshot.truncation.omitted_edges} relationships collapsed.
+      </div> : null}
+    </section>
+
+    <aside className="studio-spatial-inspector" aria-label="Semantic inspector">
+      <PanelHeading icon={<SlidersHorizontal size={15} />} title="Inspector" action={<button className="studio-icon-button compact" onClick={onOpenGovernance} aria-label="Open governance"><Activity size={14} /></button>} />
+      {selectedEntity ? <div className="studio-entity-inspector">
+        <div><span>Identity</span><strong>{selectedEntity.label}</strong><code>{selectedEntity.id}</code></div>
+        <dl>
+          <div><dt>Kind</dt><dd>{selectedEntity.kind}</dd></div>
+          <div><dt>Layer</dt><dd>{selectedEntity.semantic_layer}</dd></div>
+          <div><dt>Revision</dt><dd>{selectedEntity.revision}</dd></div>
+          <div><dt>Parent</dt><dd>{selectedEntity.parent_id ? byId.get(selectedEntity.parent_id)?.label ?? selectedEntity.parent_id : 'Root'}</dd></div>
+        </dl>
+        <section><h3>State</h3><pre>{JSON.stringify(selectedEntity.state, null, 2)}</pre></section>
+        <section><h3>Metadata</h3><pre>{JSON.stringify(selectedEntity.metadata, null, 2)}</pre></section>
+        <section><h3>Relationships</h3>{selectedRelationships.length
+          ? <ul>{selectedRelationships.map((edge) => <li key={edge.id}>
+            {edge.relationship_kind}: {byId.get(edge.source)?.label ?? edge.source} to {byId.get(edge.target)?.label ?? edge.target}
+          </li>)}</ul>
+          : <p>No projected relationships.</p>}</section>
+        <section><h3>Available actions</h3>{selectedEntity.eligible_action_ids.length
+          ? <ul>{selectedEntity.eligible_action_ids.map((action) => <li key={action}>{action}</li>)}</ul>
+          : <p>No actions are eligible for this entity.</p>}</section>
+      </div> : <EmptyState icon={<Box size={20} />} title="Nothing selected" detail="Choose an entity from the semantic hierarchy." />}
+    </aside>
+  </main>;
+}
+
+function HierarchyTree({
+  entities, selectedId, onSelect, compact = false,
+}: {
+  entities: SpatialEntity[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  compact?: boolean;
+}) {
+  const [collapsed, setCollapsed] = useState(new Set<string>());
+  const children = useMemo(() => {
+    const map = new Map<string | null, SpatialEntity[]>();
+    for (const entity of entities) {
+      const parent = entity.parent_id && entities.some((candidate) => candidate.id === entity.parent_id) ? entity.parent_id : null;
+      map.set(parent, [...(map.get(parent) ?? []), entity]);
+    }
+    for (const entries of map.values()) entries.sort((left, right) => left.position.z - right.position.z || left.position.y - right.position.y || left.label.localeCompare(right.label));
+    return map;
+  }, [entities]);
+
+  const visible = useMemo(() => {
+    const result: Array<{ entity: SpatialEntity; level: number; hasChildren: boolean }> = [];
+    function visit(parent: string | null, level: number) {
+      for (const entity of children.get(parent) ?? []) {
+        const hasChildren = Boolean(children.get(entity.id)?.length);
+        result.push({ entity, level, hasChildren });
+        if (!collapsed.has(entity.id)) visit(entity.id, level + 1);
+      }
+    }
+    visit(null, 1);
+    return compact ? result.filter((entry) => entry.level > 3).slice(0, 80) : result;
+  }, [children, collapsed, compact]);
+
+  function moveFocus(event: React.KeyboardEvent<HTMLButtonElement>, direction: number) {
+    const buttons = Array.from(event.currentTarget.closest('[role="tree"]')?.querySelectorAll<HTMLButtonElement>('[role="treeitem"]') ?? []);
+    const index = buttons.indexOf(event.currentTarget);
+    buttons[Math.max(0, Math.min(buttons.length - 1, index + direction))]?.focus();
+  }
+
+  return <div className={`studio-hierarchy-tree ${compact ? 'compact' : ''}`} role="tree" aria-label={compact ? 'Projected entities' : 'Production hierarchy'}>
+    {visible.map(({ entity, level, hasChildren }) => <button
+      key={entity.id}
+      role="treeitem"
+      data-entity-id={entity.id}
+      aria-level={level}
+      aria-selected={entity.id === selectedId}
+      aria-expanded={hasChildren ? !collapsed.has(entity.id) : undefined}
+      aria-label={`${entity.label}. ${entity.kind}. ${entity.semantic_layer} layer. ${entity.parent_id ? `Parent ${entities.find((candidate) => candidate.id === entity.parent_id)?.label ?? entity.parent_id}.` : 'Root entity.'}`}
+      className={entity.id === selectedId ? 'selected' : ''}
+      style={{ paddingInlineStart: `${8 + (level - 1) * 14}px` }}
+      onClick={() => onSelect(entity.id)}
+      onDoubleClick={() => hasChildren && setCollapsed((current) => {
+        const next = new Set(current); if (next.has(entity.id)) next.delete(entity.id); else next.add(entity.id); return next;
+      })}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowDown') { event.preventDefault(); moveFocus(event, 1); }
+        if (event.key === 'ArrowUp') { event.preventDefault(); moveFocus(event, -1); }
+        if (event.key === 'ArrowLeft' && hasChildren) setCollapsed((current) => new Set(current).add(entity.id));
+        if (event.key === 'ArrowRight' && hasChildren) setCollapsed((current) => { const next = new Set(current); next.delete(entity.id); return next; });
+      }}
+    >
+      <span className="studio-tree-kind">{entity.kind}</span>
+      <span>{entity.label}</span>
+      <small>{entity.semantic_layer}</small>
+    </button>)}
+  </div>;
+}
+
+function CaptureControl({ projectId, onComplete }: { projectId: string; onComplete: () => Promise<void> }) {
+  const [mode, setMode] = useState<'screen' | 'camera' | 'microphone' | 'screen_camera'>('screen');
+  const [recording, setRecording] = useState(false);
+  const [message, setMessage] = useState('Capture starts only after your browser permission.');
+  const [recoverable, setRecoverable] = useState<CompletedCapture[]>([]);
+  const recorders = useRef<Array<{
+    recorder: MediaRecorder; name: string; stream: MediaStream;
+    spool: CaptureSpool; writeQueue: Promise<void>;
+  }>>([]);
+  const startedAt = useRef(0);
+  const limitTimer = useRef<number | null>(null);
+
+  async function recorderFor(stream: MediaStream, name: string) {
+    const recorder = new MediaRecorder(stream, MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      ? { mimeType: 'video/webm;codecs=vp9,opus' } : undefined);
+    const spool = await createCaptureSpool(name, recorder.mimeType || 'video/webm');
+    const entry = { recorder, name, stream, spool, writeQueue: Promise.resolve() };
+    recorder.ondataavailable = (event) => {
+      if (!event.data.size) return;
+      entry.writeQueue = entry.writeQueue.then(() => entry.spool.append(event.data)).catch((cause) => {
+        setMessage(cause instanceof Error ? cause.message : 'Capture spool failed.');
+        void stop();
+      });
+    };
+    recorder.start(1000);
+    recorders.current.push(entry);
+  }
+
+  async function start() {
+    if (!navigator.mediaDevices || typeof MediaRecorder === 'undefined') {
+      setMessage('Browser capture is unavailable. Use the system recorder, then import the saved file.');
+      return;
+    }
+    try {
+      recorders.current = [];
+      if (mode === 'screen' || mode === 'screen_camera') {
+        if (!navigator.mediaDevices.getDisplayMedia) {
+          setMessage('Screen capture is unavailable here. Use the Android system recorder, then import the file.');
+          return;
+        }
+        await recorderFor(await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }), 'screen');
+      }
+      if (mode === 'camera' || mode === 'screen_camera') {
+        await recorderFor(await navigator.mediaDevices.getUserMedia({ video: true, audio: mode === 'camera' }), 'camera');
+      }
+      if (mode === 'microphone') await recorderFor(await navigator.mediaDevices.getUserMedia({ audio: true }), 'microphone');
+      startedAt.current = Date.now(); setRecording(true);
+      setMessage(recorders.current.every((entry) => entry.spool.persistent)
+        ? 'Recording to recoverable device storage. Stop to import managed tracks.'
+        : 'Recording with a bounded memory fallback. Stop to import managed tracks.');
+      limitTimer.current = window.setTimeout(() => { void stop(); }, 10 * 60 * 1000);
+    } catch (cause) {
+      recorders.current.forEach((entry) => entry.stream.getTracks().forEach((track) => track.stop()));
+      recorders.current = [];
+      setMessage(cause instanceof Error ? cause.message : 'Capture permission was not granted.');
+    }
+  }
+
+  async function stop() {
+    if (limitTimer.current) window.clearTimeout(limitTimer.current);
+    const completed = await Promise.all(recorders.current.map((entry) => new Promise<CompletedCapture>((resolve, reject) => {
+      const finish = () => { void entry.writeQueue.then(() => entry.spool.finish()).then(resolve, reject); };
+      entry.recorder.onstop = finish;
+      if (entry.recorder.state === 'inactive') finish();
+      else entry.recorder.stop();
+      entry.stream.getTracks().forEach((track) => track.stop());
+    })));
+    setRecording(false); setMessage('Importing captured tracks.');
+    try {
+      for (const entry of completed) {
+        if (!entry.blob.size) continue;
+        const form = new FormData();
+        form.set('file', new File([entry.blob], entry.fileName, { type: entry.blob.type || 'video/webm' }));
+        const response = await fetch(`/api/projects/${projectId}/assets/upload`, { method: 'POST', body: form });
+        if (!response.ok) throw new Error((await response.json()).message ?? 'Captured track import failed');
+        await entry.cleanup();
+      }
+      await onComplete();
+      setMessage(`Capture imported. ${Math.max(1, Math.round((Date.now() - startedAt.current) / 1000))} seconds recorded.`);
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : 'Capture import failed.');
+    } finally { recorders.current = []; }
+  }
+
+  useEffect(() => {
+    void recoverCaptureSpools().then(setRecoverable).catch(() => undefined);
+    return () => {
+      if (limitTimer.current) window.clearTimeout(limitTimer.current);
+      recorders.current.forEach((entry) => entry.stream.getTracks().forEach((track) => track.stop()));
+    };
+  }, []);
+
+  async function recover(entry: CompletedCapture) {
+    setMessage('Importing recovered capture.');
+    const form = new FormData();
+    form.set('file', new File([entry.blob], entry.fileName, { type: entry.blob.type || 'video/webm' }));
+    const response = await fetch(`/api/projects/${projectId}/assets/upload`, { method: 'POST', body: form });
+    if (!response.ok) { setMessage('Recovered capture import failed. The device copy was kept.'); return; }
+    await entry.cleanup();
+    setRecoverable((current) => current.filter((candidate) => candidate.fileName !== entry.fileName));
+    await onComplete();
+    setMessage('Recovered capture imported.');
+  }
+
+  return <div className="studio-capture">
+    <label htmlFor="capture-mode">Capture source</label>
+    <select id="capture-mode" value={mode} disabled={recording} onChange={(event) => setMode(event.target.value as typeof mode)}>
+      <option value="screen">Screen and system audio</option><option value="camera">Camera and microphone</option>
+      <option value="microphone">Microphone</option><option value="screen_camera">Screen plus camera</option>
+    </select>
+    <button className={`studio-button ${recording ? 'danger' : 'primary'}`} onClick={() => void (recording ? stop() : start())}>
+      {recording ? <><Square size={13} />Stop capture</> : <><Camera size={13} />Start capture</>}
+    </button>
+    {recoverable.map((entry) => <button key={entry.fileName} className="studio-button secondary" onClick={() => void recover(entry)}>
+      <Upload size={13} />Recover interrupted capture
+    </button>)}
+    <p role="status">{message}</p>
+  </div>;
+}
+
+function PanelHeading({ icon, title, action }: { icon: React.ReactNode; title: string; action?: React.ReactNode }) {
+  return <div className="studio-panel-heading"><div className="flex items-center gap-2">{icon}<h2>{title}</h2></div>{action}</div>;
+}
+
+function EmptyState({ icon, title, detail }: { icon: React.ReactNode; title: string; detail: string }) {
+  return <div className="studio-empty">{icon}<strong>{title}</strong><span>{detail}</span></div>;
+}
+
+function TrackIcon({ kind }: { kind: string }) {
+  if (kind === 'audio') return <Volume2 size={13} />;
+  if (kind === 'caption') return <Captions size={13} />;
+  if (kind === 'overlay') return <Layers3 size={13} />;
+  return <Film size={13} />;
+}
+
+function Inspector({ item, disabled, onCommand, onDelete }: {
+  item: Item; disabled: boolean;
+  onCommand: (name: string, arguments_: Record<string, unknown>) => Promise<any>;
+  onDelete: () => Promise<void>;
+}) {
+  const [gain, setGain] = useState(item.gain_db ?? 0);
+  useEffect(() => setGain(item.gain_db ?? 0), [item.id, item.gain_db]);
+  function submitTitle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const data = new FormData(event.currentTarget);
+    void onCommand('timeline.set_title', { item_id: item.id, text: String(data.get('text') ?? '') });
+  }
+  return <div className="space-y-5">
+    <div><div className="font-mono text-[9px] text-ink-3">{item.kind.toUpperCase()}</div><h3 className="mt-1 text-sm font-medium text-ink-0">{item.name}</h3><div className="mt-1 font-mono text-[10px] text-ink-2">{timecode(item.start_ticks)} / {timecode(item.duration_ticks)}</div></div>
+    {item.kind === 'title' ? <form onSubmit={submitTitle} className="studio-field"><label htmlFor="title-text">Text</label><textarea id="title-text" name="text" defaultValue={item.text ?? ''} maxLength={500} /><button className="studio-button secondary" disabled={disabled}>Apply title</button></form> : null}
+    {['video', 'image'].includes(item.kind) ? <>
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField label="Position X" value={item.x ?? 0} onCommit={(value) => onCommand('timeline.set_clip_transform', { item_id: item.id, x: value })} />
+        <NumberField label="Position Y" value={item.y ?? 0} onCommit={(value) => onCommand('timeline.set_clip_transform', { item_id: item.id, y: value })} />
+        <NumberField label="Scale" value={item.scale ?? 1} step="0.05" onCommit={(value) => onCommand('timeline.set_clip_transform', { item_id: item.id, scale: value })} />
+        <NumberField label="Opacity" value={item.opacity ?? 1} step="0.05" onCommit={(value) => onCommand('timeline.set_clip_transform', { item_id: item.id, opacity: value })} />
+      </div>
+      <div className="studio-field"><label htmlFor="fit-mode">Fit</label><select id="fit-mode" value={item.fit_mode ?? 'fit'} onChange={(event) => void onCommand('timeline.set_clip_transform', { item_id: item.id, fit_mode: event.target.value })}><option value="fit">Fit</option><option value="fill">Fill</option><option value="stretch">Stretch</option></select></div>
+    </> : null}
+    {['video', 'audio'].includes(item.kind) ? <div className="studio-field"><label htmlFor="gain">Audio gain <span>{gain.toFixed(1)} dB</span></label><input id="gain" type="range" min="-60" max="24" step="0.5" value={gain} onChange={(event) => setGain(Number(event.target.value))} onPointerUp={() => void onCommand('timeline.set_audio_gain', { item_id: item.id, gain_db: gain, muted: item.muted ?? false })} /></div> : null}
+    {item.kind === 'caption' ? <div className="grid grid-cols-2 gap-2"><button className="studio-button secondary" onClick={() => void onCommand('timeline.set_caption_style', { item_id: item.id, preset: 'bold_pop' })}>Bold pop</button><button className="studio-button secondary" onClick={() => void onCommand('timeline.set_caption_style', { item_id: item.id, preset: 'clean' })}>Clean</button></div> : null}
+    <button className="studio-button danger w-full" onClick={() => void onDelete()} disabled={disabled}><Trash2 size={14} />Delete item</button>
+  </div>;
+}
+
+function NumberField({ label, value, step = '1', onCommit }: { label: string; value: number; step?: string; onCommit: (value: number) => Promise<any> }) {
+  return <div className="studio-field"><label>{label}</label><input type="number" step={step} defaultValue={value} onBlur={(event) => {
+    const next = Number(event.target.value); if (Number.isFinite(next) && next !== value) void onCommit(next);
+  }} /></div>;
+}
+
+function ActivityDrawer({
+  receipts, context, delivery, onClose,
+}: {
+  receipts: Receipt[];
+  context: any;
+  delivery: { delivery_profiles?: Array<Record<string, any>>; release_approvals?: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }> };
+  onClose: () => void;
+}) {
+  return <aside className="studio-activity" aria-label="Governance and receipts">
+    <div className="studio-panel-heading"><div className="flex items-center gap-2"><Activity size={16} /><h2>Governance</h2></div><button className="studio-icon-button" onClick={onClose}><X size={16} /></button></div>
+    <div className="border-b border-border-base p-4 text-[11px] text-ink-1">
+      <div className="flex items-center justify-between"><span>Codex authority</span><strong className="text-ink-0">Sequence scoped</strong></div>
+      <div className="mt-2 font-mono text-[9px] leading-5 text-ink-3">{(context?.authority?.scopes ?? []).join(' / ') || 'Browser authority'}</div>
+    </div>
+    <div className="studio-governance-delivery">
+      <h3>Delivery profiles</h3>
+      {(delivery?.delivery_profiles ?? []).map((profile) => <div key={String(profile.id)}>
+        <strong>{String(profile.destination)}</strong>
+        <span>{String(profile.width)}×{String(profile.height)} / {String(profile.aspect_ratio)}</span>
+      </div>)}
+      {(delivery?.delivery_profiles ?? []).length === 0 ? <p>No delivery profile is configured.</p> : null}
+      <h3>Release approvals</h3>
+      {(delivery?.release_approvals ?? []).map((approval) => <div key={String(approval.id)}>
+        <strong>{String(approval.state).toLowerCase()}</strong>
+        <span>Revision {String(approval.project_revision)} / {(approval.attempts ?? []).length} attempts</span>
+      </div>)}
+      {(delivery?.release_approvals ?? []).length === 0 ? <p>No release approval has been issued.</p> : null}
+    </div>
+    <div className="studio-activity-list">
+      {receipts.map((receipt) => <details key={receipt.id} className="studio-receipt">
+        <summary><span className={`receipt-status ${receipt.status}`}>{receipt.status.replaceAll('_', ' ')}</span><span className="truncate">{receipt.command}</span><ChevronDown size={14} /></summary>
+        <div className="space-y-2"><div>Revision {receipt.project_revision} by {receipt.actor}</div><div className="font-mono text-[9px] text-ink-3">{receipt.id}</div><pre>{JSON.stringify(receipt.payload?.verification ?? receipt.payload?.observation ?? {}, null, 2)}</pre></div>
+      </details>)}
+      {receipts.length === 0 ? <EmptyState icon={<Activity size={20} />} title="No activity yet" detail="Committed edits and observed effects appear here." /> : null}
+    </div>
+  </aside>;
+}

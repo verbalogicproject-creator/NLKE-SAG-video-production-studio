@@ -12,9 +12,13 @@ export async function reconcileChamberRun(runId: string, workspaceId: string): P
   if (!run || ['READY_TO_PUBLISH', 'FAILED', 'CANCELLED', 'HALTED_BRAND_VIOLATION'].includes(run.status)) return;
 
   if (run.analysisJobId && ['INGESTING', 'ANALYZING'].includes(run.status)) {
-    const job = await sagEngine.job(workspaceId, run.analysisJobId);
+    const canonical = await db.canonicalJob.findUnique({ where: { id: run.analysisJobId } });
+    const job = canonical ? {
+      state: canonical.state === 'SUCCEEDED' ? 'observed_success' : canonical.state.toLowerCase(),
+      error_code: canonical.errorCode, error_detail: canonical.errorDetail,
+    } : await sagEngine.job(workspaceId, run.analysisJobId);
     if (job.state === 'observed_success') {
-      const { suggestions } = await sagEngine.suggestions(workspaceId, run.engineProjectId, job.id);
+      const { suggestions } = await sagEngine.suggestions(workspaceId, run.engineProjectId, run.analysisJobId);
       for (const suggestion of suggestions) {
         const variant = suggestion.evidence.target_variant;
         if (!variant || !run.requestedVariants.includes(variant)) continue;
@@ -50,8 +54,19 @@ export async function reconcileChamberRun(runId: string, workspaceId: string): P
 
   const rendering = run.variants.filter((entry) => entry.renderJobId && ['RENDERING', 'VERIFYING'].includes(entry.status));
   for (const variant of rendering) {
-    const job = await sagEngine.job(workspaceId, variant.renderJobId!);
+    const canonical = await db.canonicalJob.findUnique({ where: { id: variant.renderJobId! } });
+    const job = canonical ? {
+      state: canonical.state === 'SUCCEEDED' ? 'observed_success' : canonical.state === 'AWAITING_OBSERVATION' ? 'awaiting_observation' : canonical.state.toLowerCase(),
+      error_code: canonical.errorCode, error_detail: canonical.errorDetail,
+      result_artifact_id: typeof canonical.resultSnapshot === 'object' && canonical.resultSnapshot && 'artifactId' in canonical.resultSnapshot
+        ? String((canonical.resultSnapshot as { artifactId: unknown }).artifactId) : undefined,
+    } : await sagEngine.job(workspaceId, variant.renderJobId!);
     if (job.state === 'observed_success') {
+      const existing = await db.asset.findFirst({ where: { id: variant.deliverableAssetId ?? '', projectId: run.projectId } });
+      if (existing?.verifiedAt) {
+        await db.chamberVariant.update({ where: { id: variant.id }, data: { status: 'READY_TO_PUBLISH' } });
+        continue;
+      }
       const artifact = await sagEngine.artifact(workspaceId, job.result_artifact_id!);
       const controlAsset = await db.asset.upsert({
         where: { engineAssetId: artifact.id },

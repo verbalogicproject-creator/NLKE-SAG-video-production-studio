@@ -72,6 +72,13 @@ def parser() -> argparse.ArgumentParser:
     command_list.add_argument("--active", action="store_true")
     command_list.add_argument("--json", action="store_true")
 
+    action = sub.add_parser("action")
+    action_sub = action.add_subparsers(dest="action", required=True)
+    for name in ("propose", "batch"):
+        operation = action_sub.add_parser(name)
+        operation.add_argument("--commands-json", required=True, help="JSON array of registry command/arguments objects")
+        operation.add_argument("--expected-revision", type=int, required=True)
+
     asset = sub.add_parser("asset")
     asset_sub = asset.add_subparsers(dest="action", required=True)
     asset_import = asset_sub.add_parser("import")
@@ -90,6 +97,9 @@ def parser() -> argparse.ArgumentParser:
     move_item = timeline_sub.add_parser("move")
     move_item.add_argument("item_id")
     move_item.add_argument("--start-ticks", type=int, required=True)
+    move_item.add_argument("--magnetic", action="store_true")
+    move_item.add_argument("--snap-threshold-ticks", type=int)
+    move_item.add_argument("--ripple", action="store_true")
     move_item.add_argument("--expected-revision", type=int, required=True)
     split = timeline_sub.add_parser("split")
     split.add_argument("item_id")
@@ -109,6 +119,8 @@ def parser() -> argparse.ArgumentParser:
     show.add_argument("--json", action="store_true")
     undo = project_sub.add_parser("undo")
     undo.add_argument("--expected-revision", type=int, required=True)
+    redo = project_sub.add_parser("redo")
+    redo.add_argument("--expected-revision", type=int, required=True)
 
     selection = sub.add_parser("selection")
     selection_sub = selection.add_subparsers(dest="action", required=True)
@@ -215,6 +227,15 @@ def main() -> None:
         result = _api("GET", f"/api/projects/{args.project}/commands/active") if args.active else _api("GET", "/api/contract")
         if not args.active:
             result = {"commands": result["commands"]}
+    elif args.area == "action":
+        try:
+            invocations = json.loads(args.commands_json)
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"invalid --commands-json: {error}") from error
+        body = {"commands": invocations, "expected_revision": args.expected_revision}
+        if args.action == "batch":
+            body.update({"request_id": _request_id(), "actor": "terminal"})
+        result = _api("POST", f"/api/projects/{args.project}/commands/{args.action}", body)
     elif args.area == "asset" and args.action == "import":
         file_path = Path(args.file).expanduser()
         if not file_path.is_file():
@@ -241,6 +262,12 @@ def main() -> None:
             arguments["start_ticks"] = args.start_ticks
         elif args.action == "move":
             arguments["start_ticks"] = args.start_ticks
+            if args.magnetic:
+                arguments["magnetic"] = True
+            if args.snap_threshold_ticks is not None:
+                arguments["snap_threshold_ticks"] = args.snap_threshold_ticks
+            if args.ripple:
+                arguments["ripple"] = True
         elif args.action == "split":
             arguments["at_ticks"] = args.at_ticks
         result = _api(
@@ -265,7 +292,7 @@ def main() -> None:
             "POST",
             f"/api/projects/{args.project}/commands",
             {
-                "command": "project.undo",
+                "command": f"project.{args.action}",
                 "arguments": {},
                 "expected_revision": args.expected_revision,
                 "request_id": _request_id(),

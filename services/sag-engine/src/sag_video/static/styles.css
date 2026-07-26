@@ -607,13 +607,21 @@ input[type="range"] {
   border-bottom: 1px solid var(--line);
 }
 
+.timeline-edit-tools,
+.timeline-zoom-tools {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.timeline-zoom-tools { margin-left: auto; }
+
 .timeline-tools button {
   min-height: 30px;
   padding: 4px 8px;
   background: transparent;
 }
 
-.timeline-tools > span { flex: 1; }
 .timeline-tools input { width: 92px; }
 
 .timeline-tools small {
@@ -621,6 +629,13 @@ input[type="range"] {
   color: var(--muted-quiet);
   font-size: 9px;
   white-space: nowrap;
+}
+
+.timeline-scroll {
+  height: calc(100% - 46px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .danger {
@@ -657,7 +672,12 @@ input[type="range"] {
 .track-label {
   display: grid;
   align-content: center;
+  position: sticky;
+  z-index: 9;
+  left: 0;
   padding: 10px 8px;
+  background: var(--panel);
+  box-shadow: 1px 0 0 var(--line);
 }
 
 .track-label strong {

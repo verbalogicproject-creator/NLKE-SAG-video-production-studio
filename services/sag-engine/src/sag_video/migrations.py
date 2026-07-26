@@ -9,7 +9,7 @@ from uuid import uuid4
 from .models import Asset, Canvas, Project, Receipt, ReceiptStatus, TimelineItem, Track, utc_now
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 12
 
 
 NORMALIZED_SCHEMA = """
@@ -333,6 +333,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
     byte_size INTEGER NOT NULL,
     mime_type TEXT,
     provenance_json TEXT NOT NULL DEFAULT '{}',
+    storage_backend TEXT,
+    storage_namespace TEXT,
+    storage_key TEXT,
+    storage_version TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
     FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
@@ -448,6 +452,9 @@ CREATE TABLE IF NOT EXISTS generation_candidates (
 CREATE TABLE IF NOT EXISTS pairings (
     code TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
+    project_id TEXT,
+    sequence_id TEXT,
+    scopes_json TEXT NOT NULL DEFAULT '[]',
     expires_at TEXT NOT NULL,
     consumed INTEGER NOT NULL DEFAULT 0
 );
@@ -455,9 +462,37 @@ CREATE TABLE IF NOT EXISTS pairings (
 CREATE TABLE IF NOT EXISTS tokens (
     token TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
+    project_id TEXT,
+    sequence_id TEXT,
+    scopes_json TEXT NOT NULL DEFAULT '[]',
     actor_name TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     revoked INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS actor_focus (
+    token TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    item_ids_json TEXT NOT NULL DEFAULT '[]',
+    visible_surface TEXT NOT NULL DEFAULT 'studio',
+    active_workflow TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(token,project_id),
+    FOREIGN KEY(token) REFERENCES tokens(token) ON DELETE CASCADE,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS action_confirmations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    arguments_hash TEXT NOT NULL,
+    expected_revision INTEGER NOT NULL,
+    confirmed_by TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -475,6 +510,10 @@ CREATE TABLE IF NOT EXISTS media_blobs (
     storage_project_id TEXT NOT NULL,
     storage_asset_id TEXT NOT NULL,
     storage_kind TEXT NOT NULL,
+    storage_backend TEXT,
+    storage_namespace TEXT,
+    storage_key TEXT,
+    storage_version TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -1242,6 +1281,202 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 ("platform_and_brand_lineage", utc_now()),
             )
             connection.execute("PRAGMA user_version=6")
+        applied.add(6)
+    if 7 not in applied:
+        with connection:
+            for table in ("media_blobs", "artifacts"):
+                columns = _table_columns(connection, table)
+                for name in ("storage_backend", "storage_namespace", "storage_key", "storage_version"):
+                    if name not in columns:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT")
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (7,?,?)",
+                ("durable_storage_locators", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=7")
+        applied.add(7)
+    if 8 not in applied:
+        with connection:
+            for table in ("pairings", "tokens"):
+                columns = _table_columns(connection, table)
+                for name, sql_type, default in (
+                    ("project_id", "TEXT", ""),
+                    ("sequence_id", "TEXT", ""),
+                    ("scopes_json", "TEXT", " NOT NULL DEFAULT '[]'"),
+                ):
+                    if name not in columns:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}{default}")
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS actor_focus (
+                    token TEXT NOT NULL, project_id TEXT NOT NULL,
+                    item_ids_json TEXT NOT NULL DEFAULT '[]', visible_surface TEXT NOT NULL DEFAULT 'studio',
+                    active_workflow TEXT, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(token,project_id),
+                    FOREIGN KEY(token) REFERENCES tokens(token) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS action_confirmations (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, command TEXT NOT NULL,
+                    arguments_hash TEXT NOT NULL, expected_revision INTEGER NOT NULL,
+                    confirmed_by TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (8,?,?)",
+                ("scoped_actor_authority_and_confirmations", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=8")
+        applied.add(8)
+    if 9 not in applied:
+        with connection:
+            focus_columns = _table_columns(connection, "actor_focus")
+            if "active_depth" not in focus_columns:
+                connection.execute("ALTER TABLE actor_focus ADD COLUMN active_depth TEXT NOT NULL DEFAULT 'edit'")
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS sag_event_definitions (
+                    kind TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version >= 1),
+                    json_schema TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    release_status TEXT NOT NULL, retention_class TEXT NOT NULL,
+                    reconciled_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sag_runtime_events (
+                    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE, workspace_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL, sequence_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL, actor TEXT NOT NULL,
+                    session_id TEXT, kind TEXT NOT NULL, trace_id TEXT,
+                    payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY(kind) REFERENCES sag_event_definitions(kind)
+                );
+                CREATE INDEX IF NOT EXISTS idx_sag_runtime_scope_cursor
+                    ON sag_runtime_events(workspace_id,project_id,sequence_id,cursor);
+                CREATE INDEX IF NOT EXISTS idx_sag_runtime_expiry ON sag_runtime_events(expires_at);
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (9,?,?)",
+                ("semantic_runtime_events_and_spatial_focus", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=9")
+        applied.add(9)
+    if 10 not in applied:
+        with connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS provider_connections (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+                    provider TEXT NOT NULL, purpose TEXT NOT NULL, display_name TEXT NOT NULL,
+                    state TEXT NOT NULL, scopes_json TEXT NOT NULL DEFAULT '[]',
+                    encrypted_secret TEXT NOT NULL, kms_key_version TEXT NOT NULL,
+                    secret_fingerprint TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(workspace_id,provider,purpose,display_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_provider_connections_workspace
+                    ON provider_connections(workspace_id,state,updated_at DESC);
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (10,?,?)",
+                ("provider_neutral_protected_connections", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=10")
+        applied.add(10)
+    if 11 not in applied:
+        with connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS delivery_profiles (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, destination TEXT NOT NULL,
+                    aspect_ratio TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+                    caption_placement TEXT NOT NULL, safe_zone_x INTEGER NOT NULL, safe_zone_y INTEGER NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(project_id,destination),
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS release_approvals (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                    project_revision INTEGER NOT NULL, bundle_hash TEXT NOT NULL,
+                    artifact_hashes_json TEXT NOT NULL, destinations_json TEXT NOT NULL,
+                    state TEXT NOT NULL, approved_by TEXT NOT NULL, expires_at TEXT NOT NULL,
+                    consumed_at TEXT, created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id,bundle_hash),
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+                );
+                CREATE TABLE IF NOT EXISTS release_publication_attempts (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                    approval_id TEXT NOT NULL, destination TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL, external_id TEXT, bounded_error TEXT, attempt INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(approval_id,destination),
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(approval_id) REFERENCES release_approvals(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS idx_release_approvals_project
+                    ON release_approvals(project_id,state,created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_release_attempts_project
+                    ON release_publication_attempts(project_id,state,updated_at DESC);
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (11,?,?)",
+                ("engine_owned_delivery_governance", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=11")
+        applied.add(11)
+    if 12 not in applied:
+        with connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS sag_journal_kind_definitions (
+                    kind TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version >= 1),
+                    protocol TEXT NOT NULL, release_status TEXT NOT NULL,
+                    source_hash TEXT NOT NULL, reconciled_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sag_journal_streams (
+                    namespace TEXT PRIMARY KEY, head_seq INTEGER NOT NULL DEFAULT 0,
+                    head_hash TEXT, hash_alg TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sag_journal_entries (
+                    namespace TEXT NOT NULL, seq INTEGER, id TEXT NOT NULL,
+                    prev_hash TEXT, row_hash TEXT, hash_alg TEXT,
+                    kind TEXT NOT NULL, content TEXT NOT NULL, session_id TEXT, batch TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}',
+                    method TEXT NOT NULL, schema_version INTEGER NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(namespace,id), UNIQUE(namespace,seq),
+                    FOREIGN KEY(kind) REFERENCES sag_journal_kind_definitions(kind)
+                );
+                CREATE INDEX IF NOT EXISTS idx_sag_journal_namespace_seq
+                    ON sag_journal_entries(namespace,seq);
+                CREATE INDEX IF NOT EXISTS idx_sag_journal_kind_created
+                    ON sag_journal_entries(kind,created_at);
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (12,?,?)",
+                ("provider_neutral_tamper_evident_journal", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=12")
     connection.execute("PRAGMA foreign_keys=ON")
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:

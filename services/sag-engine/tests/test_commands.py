@@ -67,6 +67,76 @@ def test_undo_creates_compensating_revision(client):
     assert project["revision"] == 3
 
 
+def test_multi_step_undo_and_redo_walk_edit_history(client):
+    first = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.set_title_transform", {"item_id": "title_intro", "x": 80},
+            request_id="history-first-0001",
+        ),
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.set_title_transform", {"item_id": "title_intro", "y": 90},
+            revision=2, request_id="history-second-0001",
+        ),
+    )
+    assert second.status_code == 200
+    assert client.post(
+        "/api/projects/demo/commands",
+        json=command_body("project.undo", {}, revision=3, request_id="history-undo-0001"),
+    ).status_code == 200
+    assert client.post(
+        "/api/projects/demo/commands",
+        json=command_body("project.undo", {}, revision=4, request_id="history-undo-0002"),
+    ).status_code == 200
+    base_title = next(
+        item for track in client.get("/api/projects/demo").json()["project"]["tracks"]
+        for item in track["items"] if item["id"] == "title_intro"
+    )
+    assert (base_title["x"], base_title["y"]) == (-22, 56)
+    assert client.post(
+        "/api/projects/demo/commands",
+        json=command_body("project.redo", {}, revision=5, request_id="history-redo-0001"),
+    ).status_code == 200
+    assert client.post(
+        "/api/projects/demo/commands",
+        json=command_body("project.redo", {}, revision=6, request_id="history-redo-0002"),
+    ).status_code == 200
+    restored = next(
+        item for track in client.get("/api/projects/demo").json()["project"]["tracks"]
+        for item in track["items"] if item["id"] == "title_intro"
+    )
+    assert (restored["x"], restored["y"]) == (80, 90)
+
+
+def test_magnetic_and_ripple_move_are_canonical(client):
+    response = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.move_item",
+            {"item_id": "clip_result", "start_ticks": 360100, "magnetic": True},
+            request_id="magnetic-move-0001",
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["payload"]["observation"]["start_ticks"] == 360000
+    ripple = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "timeline.move_item",
+            {"item_id": "clip_terminal", "start_ticks": 120000, "ripple": True},
+            revision=2, request_id="ripple-move-0001",
+        ),
+    )
+    assert ripple.status_code == 200
+    project = client.get("/api/projects/demo").json()["project"]
+    result = next(item for track in project["tracks"] for item in track["items"] if item["id"] == "clip_result")
+    assert result["start_ticks"] == 480000
+
+
 def test_edit_receipt_discloses_non_independent_readback(client):
     response = client.post(
         "/api/projects/demo/commands",
@@ -78,4 +148,3 @@ def test_edit_receipt_discloses_non_independent_readback(client):
     observation = response.json()["payload"]["observation"]
     assert observation["kind"] == "canonical_revision_readback"
     assert observation["independent_failure_domain"] is False
-

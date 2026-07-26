@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from .models import CaptionStyle, ObservationContract, Project, Receipt, ReceiptStatus, TICKS_PER_SECOND
 from .repository import ArtifactRecord, JobRecord
 from .store import Store
+from .blob_storage import BlobStorage, FilesystemBlobStorage, StorageLocator
 
 
 class RenderValidationError(ValueError):
@@ -185,13 +186,30 @@ class RenderService:
         media_resolver: Callable[[Project, str], Path],
         observer: Callable[[ObservationContract], object],
         timeout_seconds: float = 180,
+        blob_storage: BlobStorage | None = None,
     ):
         self.store = store
         self.artifact_dir = Path(artifact_dir).resolve()
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self.media_resolver = media_resolver
         self.observer = observer
+        self.blob_storage = blob_storage or FilesystemBlobStorage(self.artifact_dir / "storage")
         self.timeout_seconds = timeout_seconds
+
+    def path_for_artifact(self, artifact: ArtifactRecord) -> Path:
+        if artifact.storage_backend and artifact.storage_namespace and artifact.storage_key:
+            return self.blob_storage.materialize(
+                StorageLocator(
+                    artifact.storage_backend, artifact.storage_namespace,
+                    artifact.storage_key, artifact.storage_version,
+                ),
+                identity=artifact.id,
+                expected_sha256=artifact.sha256,
+            )
+        path = (self.artifact_dir / f"{artifact.id}.mp4").resolve()
+        if not path.is_relative_to(self.artifact_dir) or not path.is_file():
+            raise FileNotFoundError(artifact.id)
+        return path
 
     def build_spec(self, project: Project) -> RenderSpecification:
         media: list[RenderMediaSpec] = []
@@ -350,7 +368,7 @@ class RenderService:
         ])
         return command
 
-    def execute(self, job: JobRecord) -> None:
+    def execute(self, job: JobRecord, *, defer_observation: bool = False) -> ArtifactRecord | None:
         receipt = self.store.get_receipt(str(job.frozen_spec["receipt_id"]))
         spec = RenderSpecification.model_validate(job.frozen_spec["render_spec"])
         project = self.store.get_project_revision(spec.project_id, spec.project_revision)
@@ -396,18 +414,15 @@ class RenderService:
                 return
             os.replace(temporary, final_path)
         digest = _sha256(final_path)
-        artifact = self.store.create_artifact(ArtifactRecord(
-            id=artifact_id, project_id=spec.project_id, job_id=job.id, asset_id=None,
-            kind="rendered_video", managed_uri=f"sag-artifact://{artifact_id}", sha256=digest,
-            byte_size=final_path.stat().st_size, mime_type="video/mp4",
-            provenance={"project_revision": spec.project_revision, "render_contract": spec.contract_version},
-        ))
-        receipt = self.store.update_receipt(receipt, ReceiptStatus.ARTIFACT_WRITTEN, {
-            "artifact_id": artifact.id, "artifact_sha256": digest,
-            "artifact_url": f"/api/artifacts/{artifact.id}/content",
-        })
-        self.store.update_job(job.id, state="awaiting_observation", progress=.85, result_artifact_id=artifact.id)
-        receipt = self.store.update_receipt(receipt, ReceiptStatus.AWAITING_OBSERVATION)
+        stored = self.blob_storage.put_immutable(
+            final_path,
+            workspace_id=project.workspace_id or spec.project_id,
+            project_id=spec.project_id,
+            identity=artifact_id,
+            category="artifacts",
+            content_type="video/mp4",
+            expected_sha256=digest,
+        )
         title = spec.titles[0] if spec.titles else None
         contract = ObservationContract(
             project_id=spec.project_id, project_revision=spec.project_revision,
@@ -418,7 +433,30 @@ class RenderService:
             safe_margin_x=round(spec.width * .05), safe_margin_y=round(spec.height * .05),
             marker_rgb=_rgb(title.color) if title else None,
             expect_audio=any(item.has_audio for item in spec.media),
+            expect_captions=bool(spec.captions),
         )
+        artifact = self.store.create_artifact(ArtifactRecord(
+            id=artifact_id, project_id=spec.project_id, job_id=job.id, asset_id=None,
+            kind="rendered_video", managed_uri=f"sag-artifact://{artifact_id}", sha256=digest,
+            byte_size=final_path.stat().st_size, mime_type="video/mp4",
+            provenance={
+                "project_revision": spec.project_revision,
+                "render_contract": spec.contract_version,
+                "observation_contract": contract.model_dump(mode="json", exclude={"artifact_path"}),
+            },
+            storage_backend=stored.locator.backend,
+            storage_namespace=stored.locator.namespace,
+            storage_key=stored.locator.key,
+            storage_version=stored.locator.version,
+        ))
+        receipt = self.store.update_receipt(receipt, ReceiptStatus.ARTIFACT_WRITTEN, {
+            "artifact_id": artifact.id, "artifact_sha256": digest,
+            "artifact_url": f"/api/artifacts/{artifact.id}/content",
+        })
+        self.store.update_job(job.id, state="awaiting_observation", progress=.85, result_artifact_id=artifact.id)
+        receipt = self.store.update_receipt(receipt, ReceiptStatus.AWAITING_OBSERVATION)
+        if defer_observation:
+            return artifact
         try:
             observation = self.observer(contract)
             payload = observation.model_dump(mode="json")
@@ -431,6 +469,7 @@ class RenderService:
                 "failure_stage": "observer", "observer_error": str(error), "inconclusive": True,
             })
             self.store.update_job(job.id, state="observed_failure", progress=1, error_code="observer_error", error_detail=str(error))
+        return artifact
 
 
 class RenderWorker:

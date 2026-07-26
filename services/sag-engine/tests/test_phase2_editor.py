@@ -67,11 +67,17 @@ def test_insert_split_move_delete_and_undo_are_canonical(client, tmp_path):
     )
     assert moved.status_code == 200
 
+    confirmation = client.post(
+        "/api/projects/demo/confirmations",
+        json={"command": "timeline.delete_item", "arguments": {"item_id": new_id}, "expected_revision": 5},
+    ).json()
+    delete_body = command_body(
+        "timeline.delete_item", {"item_id": new_id}, revision=5, request_id="phase2-delete-0001"
+    )
+    delete_body["confirmation_id"] = confirmation["id"]
     deleted = client.post(
         "/api/projects/demo/commands",
-        json=command_body(
-            "timeline.delete_item", {"item_id": new_id}, revision=5, request_id="phase2-delete-0001"
-        ),
+        json=delete_body,
     )
     assert deleted.status_code == 200
     assert all(item["id"] != new_id for track in client.get("/api/projects/demo").json()["project"]["tracks"] for item in track["items"])
@@ -196,6 +202,9 @@ def test_interactive_editor_controls_are_shipped(client):
     assert 'data-trim="left"' in javascript and 'data-trim="right"' in javascript
     assert "requestAnimationFrame(playbackTick)" in javascript
     assert "activeVideoItem" in javascript
+    assert 'id="monitor-placeholder"' in html
+    assert 'placeholder.querySelector("strong").textContent = asset.name' in javascript
+    assert "activateMobilePane" in javascript
     assert 'id="copy-pair-command"' in html
     assert "navigator.clipboard.writeText" in javascript
     assert '$("pair-dialog").close()' not in javascript.split("async function checkPairStatus()", 1)[1].split('$("pair").onclick', 1)[0]

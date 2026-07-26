@@ -3,10 +3,10 @@ import '@/styles/globals.css';
 
 export const metadata: Metadata = {
   title: {
-    default: 'SAG Video Chamber',
-    template: '%s | SAG Video Chamber',
+    default: 'SAG Video by Verbalogix',
+    template: '%s | SAG Video',
   },
-  description: 'Create, refine, and independently verify three platform-specific vertical video drafts.',
+  description: 'A governed video production studio for direct editing and Codex-operated workflows.',
   metadataBase: new URL('https://lab.verbalogix.com'),
   robots: {
     index: false,

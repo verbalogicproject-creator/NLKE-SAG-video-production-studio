@@ -100,10 +100,16 @@ def test_two_trimmed_clips_and_unicode_title_render_from_textfile(client, tmp_pa
 
     def command(name, arguments, request_id):
         nonlocal revision
-        result = client.post("/api/projects/demo/commands", json={
+        body = {
             "command": name, "arguments": arguments, "expected_revision": revision,
             "request_id": request_id, "actor": "test",
-        })
+        }
+        if name == "timeline.delete_item":
+            confirmation = client.post("/api/projects/demo/confirmations", json={
+                "command": name, "arguments": arguments, "expected_revision": revision,
+            }).json()
+            body["confirmation_id"] = confirmation["id"]
+        result = client.post("/api/projects/demo/commands", json=body)
         assert result.status_code == 200, result.text
         payload = result.json()
         revision = payload["project_revision"]

@@ -16,7 +16,11 @@ fi
 : "${SAG_VIDEO_SERVICE_TOKEN:=local-chamber-service}"
 : "${SAG_ENGINE_URL:=http://127.0.0.1:8080}"
 : "${VERBALOGIX_LOCAL_DEV:=1}"
+: "${SAG_REPOSITORY_BACKEND:=postgres}"
+: "${SAG_STORAGE_BACKEND:=filesystem}"
+: "${SAG_VIDEO_STORAGE_ROOT:=$REPO_DIR/.sag-video/storage}"
 export DATABASE_URL SAG_VIDEO_SERVICE_TOKEN SAG_ENGINE_URL VERBALOGIX_LOCAL_DEV
+export SAG_REPOSITORY_BACKEND SAG_STORAGE_BACKEND SAG_VIDEO_STORAGE_ROOT
 
 sh "$REPO_DIR/scripts/termux-preflight.sh"
 
@@ -30,7 +34,7 @@ createdb verbalogix_chamber 2>/dev/null || true
 
 cd "$REPO_DIR"
 pnpm db:generate
-pnpm --filter @verbalogix/web exec prisma db push --schema=../../prisma/schema.prisma
+pnpm db:deploy
 
 cd "$REPO_DIR/services/sag-engine"
 PYTHONPATH=src uvicorn sag_video.observer_app:app --host 127.0.0.1 --port 8082 >"$RUN_DIR/observer.log" 2>&1 & echo $! >"$RUN_DIR/observer.pid"

@@ -24,13 +24,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       return NextResponse.json({ error: 'upload_quota_exceeded' }, { status: 413 });
     }
     const [stored, reserved] = await Promise.all([
-      db.asset.aggregate({ where: { project: { workspaceId } }, _sum: { sizeBytes: true } }),
+      db.quotaLedger.aggregate({ where: { workspaceId, kind: 'STORAGE_BYTES' }, _sum: { amount: true } }),
       db.uploadSession.aggregate({
         where: { workspaceId, status: { in: ['ISSUED', 'UPLOADED', 'VERIFYING'] }, expiresAt: { gt: new Date() } },
         _sum: { expectedSizeBytes: true },
       }),
     ]);
-    if ((stored._sum.sizeBytes ?? 0n) + (reserved._sum.expectedSizeBytes ?? 0n) + input.sizeBytes > workspace.storageLimitBytes) {
+    if ((stored._sum.amount ?? 0n) + (reserved._sum.expectedSizeBytes ?? 0n) + input.sizeBytes > workspace.storageLimitBytes) {
       return NextResponse.json({ error: 'workspace_storage_quota_exceeded' }, { status: 409 });
     }
     const assetId = `asset_${randomUUID().replaceAll('-', '')}`;

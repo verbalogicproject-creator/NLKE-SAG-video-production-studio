@@ -180,6 +180,7 @@ model User {
   accounts   Account[]
   apiKeys    ApiKey[]              @relation("ApiKeyCreator")
   approvals  PublicationApproval[]
+  releaseApprovals ReleaseBundleApproval[]
 
   @@index([email])
   @@schema("control")
@@ -247,6 +248,8 @@ model Workspace {
   approvals           PublicationApproval[]
   publicationAttempts PublicationAttempt[]
   auditEvents         AuditEvent[]
+  releaseApprovals    ReleaseBundleApproval[]
+  releaseAttempts     ReleasePublicationAttempt[]
 
   @@index([slug])
   @@schema("control")
@@ -315,8 +318,90 @@ model Project {
   uploadSessions  UploadSession[]
   chamberRuns     ChamberRun[]
   jobs            CanonicalJob[]
+  sequences       StudioSequence[]
 
   @@index([workspaceId, createdAt])
+  @@schema("control")
+}
+
+model StudioSequence {
+  id                 String    @id @default(cuid())
+  projectId          String
+  engineProjectId    String    @unique
+  name               String
+  currentRevision    Int       @default(1)
+  durationLimitTicks Int       @default(21600000)
+  legacyVariant      Boolean   @default(false)
+  archivedAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  project            Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deliveryProfiles   DeliveryProfile[]
+  releaseApprovals   ReleaseBundleApproval[]
+
+  @@index([projectId, createdAt])
+  @@schema("control")
+}
+
+model DeliveryProfile {
+  id               String         @id @default(cuid())
+  sequenceId       String
+  destination      String
+  aspectRatio      String
+  width            Int
+  height           Int
+  captionPlacement String         @default("safe_bottom")
+  safeZoneX        Int            @default(48)
+  safeZoneY        Int            @default(96)
+  metadata         Json           @default("{}")
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  sequence         StudioSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+
+  @@unique([sequenceId, destination])
+  @@schema("control")
+}
+
+model ReleaseBundleApproval {
+  id               String         @id @default(cuid())
+  workspaceId      String
+  sequenceId       String
+  sequenceRevision Int
+  bundleHash       String
+  artifactHashes   String[]
+  destinations     Json
+  state            ApprovalState  @default(ACTIVE)
+  approvedById     String
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  createdAt        DateTime       @default(now())
+  workspace        Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sequence         StudioSequence @relation(fields: [sequenceId], references: [id], onDelete: Restrict)
+  approvedBy       User           @relation(fields: [approvedById], references: [id], onDelete: Restrict)
+  attempts         ReleasePublicationAttempt[]
+
+  @@unique([workspaceId, bundleHash])
+  @@index([workspaceId, state, expiresAt])
+  @@schema("control")
+}
+
+model ReleasePublicationAttempt {
+  id             String                @id @default(cuid())
+  workspaceId    String
+  approvalId     String
+  destination    String
+  idempotencyKey String                @unique
+  state          PublicationState      @default(PENDING)
+  externalId     String?
+  boundedError   String?               @db.Text
+  attempt        Int                   @default(0)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  workspace      Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  approval       ReleaseBundleApproval @relation(fields: [approvalId], references: [id], onDelete: Restrict)
+
+  @@unique([approvalId, destination])
+  @@index([workspaceId, state, updatedAt])
   @@schema("control")
 }
 
@@ -452,6 +537,15 @@ model CanonicalJob {
   leaseExpiresAt    DateTime?
   errorCode         String?
   errorDetail       String?               @db.Text
+  inputVersion      String                @default("sag-job-1")
+  inputSnapshot     Json                  @default("{}")
+  resultSnapshot    Json?
+  progress          Float                 @default(0)
+  stage             String?
+  statusMessage     String?
+  cancellationRequested Boolean           @default(false)
+  heartbeatAt       DateTime?
+  maxAttempts       Int                   @default(3)
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
   workspace         Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

@@ -33,7 +33,22 @@ export async function POST(request: Request) {
         engineProjectId: engine.project.id,
         engineRevision: engine.project.revision,
         status: 'DRAFT',
+        sequences: {
+          create: {
+            engineProjectId: engine.project.id,
+            name: `${name} master`,
+            currentRevision: engine.project.revision,
+            deliveryProfiles: {
+              create: [
+                { destination: 'youtube_shorts', aspectRatio: '9:16', width: 1080, height: 1920 },
+                { destination: 'tiktok', aspectRatio: '9:16', width: 1080, height: 1920 },
+                { destination: 'instagram_reels', aspectRatio: '9:16', width: 1080, height: 1920 },
+              ],
+            },
+          },
+        },
       },
+      include: { sequences: { include: { deliveryProfiles: true } } },
     });
     return NextResponse.json(jsonSafe({ project }), { status: 201 });
   } catch (error) {

@@ -86,3 +86,6 @@ def test_mobile_stylesheet_is_loaded(client):
     stylesheet = client.get("/static/mobile.css")
     assert stylesheet.status_code == 200
     assert "@media (max-width: 800px)" in stylesheet.text
+    assert ".workspace > .panel:not(.mobile-pane-active)" in stylesheet.text
+    assert 'class="timeline-scroll"' in index.text
+    assert 'role="tablist"' in index.text

@@ -1,0 +1,29 @@
+{
+  "schema_version": "sag-x1-conformance/0.1-draft",
+  "authority": "sag-video",
+  "honesty": "SAG Video draft fixtures; not frozen shared X1 until the framework-side schemas reconcile.",
+  "fixtures": [
+    {
+      "id": "runtime-adjacency",
+      "project_id": "demo",
+      "mode": "adjacent",
+      "seed_local_ids": ["clip_terminal"],
+      "max_hops": 1,
+      "expected_local_id_order": ["clip_terminal", "asset_intro", "track_video"]
+    },
+    {
+      "id": "runtime-blast-radius",
+      "project_id": "demo",
+      "mode": "blast-radius",
+      "seed_local_ids": ["asset_intro"],
+      "max_hops": 4,
+      "expected_local_ids": [
+        "asset_intro",
+        "clip_terminal",
+        "job_release_verified",
+        "artifact_release_verified",
+        "__created_release_approval__"
+      ]
+    }
+  ]
+}

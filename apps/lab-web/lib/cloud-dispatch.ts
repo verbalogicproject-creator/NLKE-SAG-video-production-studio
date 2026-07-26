@@ -12,7 +12,7 @@ function required(name: string): string {
 }
 
 export async function flushOutbox(limit = 50): Promise<number> {
-  if (process.env.QUEUE_BACKEND !== 'cloud-tasks') return 0;
+  if (process.env.QUEUE_BACKEND !== 'cloud-tasks' || process.env.CLOUD_EXECUTION_ENABLED !== 'true') return 0;
   const entries = await db.outboxEvent.findMany({
     where: { state: 'PENDING', availableAt: { lte: new Date() } },
     include: { job: true },

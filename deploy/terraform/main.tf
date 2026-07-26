@@ -8,6 +8,24 @@ locals {
     "vpcaccess.googleapis.com", "billingbudgets.googleapis.com"
   ])
   service_accounts = toset(["web", "engine", "dispatcher", "intake", "analysis", "render", "observer", "publisher", "task-invoker"])
+  secret_consumers = {
+    database-url         = ["web", "engine", "dispatcher", "intake", "analysis", "render", "observer", "publisher"]
+    nextauth-secret      = ["web"]
+    google-client-id     = ["web", "publisher"]
+    google-client-secret = ["web", "publisher"]
+    transcription-api-key = ["analysis"]
+  }
+  secret_access = {
+    for binding in flatten([
+      for secret, consumers in local.secret_consumers : [
+        for service in consumers : {
+          key     = "${secret}:${service}"
+          secret  = secret
+          service = service
+        }
+      ]
+    ]) : binding.key => binding
+  }
   common_env = {
     GOOGLE_CLOUD_PROJECT = var.project_id
     GCP_REGION           = var.region
@@ -129,7 +147,7 @@ resource "google_sql_database" "chamber" {
 }
 
 resource "google_secret_manager_secret" "secret" {
-  for_each  = toset(["database-url", "nextauth-secret", "google-client-id", "google-client-secret", "sag-service-token"])
+  for_each  = toset(["database-url", "nextauth-secret", "google-client-id", "google-client-secret", "transcription-api-key"])
   secret_id = "${local.prefix}-${each.key}"
   replication { auto {} }
 }
@@ -164,6 +182,14 @@ resource "google_cloud_run_v2_service" "web" {
   name     = "${local.prefix}-web"
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
+
+  lifecycle {
+    precondition {
+      condition     = !var.external_beta_enabled || (var.enable_cloud_execution && var.cloud_sql_ha)
+      error_message = "External beta admission requires Cloud execution and regional Cloud SQL HA."
+    }
+  }
+
   template {
     service_account = google_service_account.service["web"].email
     vpc_access {
@@ -185,6 +211,8 @@ resource "google_cloud_run_v2_service" "web" {
         }
       }
       env { name = "NODE_ENV" value = "production" }
+      env { name = "CLOUD_EXECUTION_ENABLED" value = tostring(var.enable_cloud_execution) }
+      env { name = "GLOBAL_HEAVY_JOB_LIMIT" value = "2" }
       env { name = "CLOUD_RUN_INTAKE_JOB" value = google_cloud_run_v2_job.job["intake"].name }
       env { name = "CLOUD_RUN_ANALYSIS_JOB" value = google_cloud_run_v2_job.job["analysis"].name }
       env { name = "CLOUD_RUN_RENDER_JOB" value = google_cloud_run_v2_job.job["render"].name }
@@ -228,10 +256,13 @@ resource "google_cloud_run_v2_service" "engine" {
       env { name = "SAG_VIDEO_START_ANALYSIS_WORKER" value = "0" }
       env { name = "SAG_VIDEO_START_RENDER_WORKER" value = "0" }
       env { name = "SAG_VIDEO_GCS_BUCKET" value = google_storage_bucket.media.name }
+      env { name = "SAG_REPOSITORY_BACKEND" value = "postgres" }
+      env { name = "SAG_STORAGE_BACKEND" value = "gcs" }
+      env { name = "SAG_VIDEO_STORAGE_CACHE_DIR" value = "/tmp/sag-cache" }
       env { name = "SAG_TRUST_CLOUD_RUN_IAM" value = "1" }
       env {
-        name = "SAG_VIDEO_SERVICE_TOKEN"
-        value_source { secret_key_ref { secret = google_secret_manager_secret.secret["sag-service-token"].secret_id version = "latest" } }
+        name = "DATABASE_URL"
+        value_source { secret_key_ref { secret = google_secret_manager_secret.secret["database-url"].secret_id version = "latest" } }
       }
       resources { limits = { cpu = "2", memory = "2Gi" } }
     }
@@ -252,6 +283,8 @@ resource "google_cloud_run_v2_service" "dispatcher" {
         for_each = local.common_env
         content { name = env.key value = env.value }
       }
+      env { name = "CLOUD_EXECUTION_ENABLED" value = tostring(var.enable_cloud_execution) }
+      env { name = "GLOBAL_HEAVY_JOB_LIMIT" value = "2" }
       env { name = "CLOUD_RUN_INTAKE_JOB" value = google_cloud_run_v2_job.job["intake"].name }
       env { name = "CLOUD_RUN_ANALYSIS_JOB" value = google_cloud_run_v2_job.job["analysis"].name }
       env { name = "CLOUD_RUN_RENDER_JOB" value = google_cloud_run_v2_job.job["render"].name }
@@ -268,11 +301,11 @@ resource "google_cloud_run_v2_service" "dispatcher" {
 
 locals {
   jobs = {
-    intake    = { image = var.engine_image, sa = "intake", timeout = "1800s", memory = "2Gi", cpu = "2" }
-    analysis  = { image = var.engine_image, sa = "analysis", timeout = "3600s", memory = "4Gi", cpu = "2" }
-    render    = { image = var.engine_image, sa = "render", timeout = "3600s", memory = "8Gi", cpu = "4" }
-    observer  = { image = var.engine_image, sa = "observer", timeout = "1800s", memory = "4Gi", cpu = "2" }
-    publisher = { image = var.jobs_image, sa = "publisher", timeout = "3600s", memory = "1Gi", cpu = "1" }
+    intake    = { image = var.engine_image, sa = "intake", timeout = "1800s", memory = "2Gi", cpu = "2", kind = "INTAKE", python = true }
+    analysis  = { image = var.engine_image, sa = "analysis", timeout = "3600s", memory = "4Gi", cpu = "2", kind = "ANALYSIS", python = true }
+    render    = { image = var.engine_image, sa = "render", timeout = "3600s", memory = "8Gi", cpu = "4", kind = "RENDER", python = true }
+    observer  = { image = var.engine_image, sa = "observer", timeout = "1800s", memory = "4Gi", cpu = "2", kind = "OBSERVE", python = true }
+    publisher = { image = var.jobs_image, sa = "publisher", timeout = "3600s", memory = "1Gi", cpu = "1", kind = "PUBLISH_YOUTUBE", python = false }
   }
 }
 resource "google_cloud_run_v2_job" "job" {
@@ -289,18 +322,35 @@ resource "google_cloud_run_v2_job" "job" {
       vpc_access { connector = google_vpc_access_connector.run.id egress = "PRIVATE_RANGES_ONLY" }
       containers {
         image = each.value.image
+        command = each.value.python ? ["python"] : null
+        args    = each.value.python ? ["-m", "sag_video.cloud_job"] : null
         env { name = "SAG_VIDEO_GCS_BUCKET" value = google_storage_bucket.media.name }
+        env { name = "SAG_JOB_KIND" value = each.value.kind }
+        env { name = "SAG_REPOSITORY_BACKEND" value = "postgres" }
+        env { name = "SAG_STORAGE_BACKEND" value = "gcs" }
+        env { name = "SAG_VIDEO_STORAGE_CACHE_DIR" value = "/tmp/sag-cache" }
+        env { name = "SAG_VIDEO_TRANSCRIPTION_BASE_URL" value = each.key == "analysis" ? var.transcription_base_url : "" }
+        env { name = "SAG_VIDEO_TRANSCRIPTION_MODEL" value = var.transcription_model }
         env {
           name = "DATABASE_URL"
           value_source { secret_key_ref { secret = google_secret_manager_secret.secret["database-url"].secret_id version = "latest" } }
         }
-        env {
-          name = "GOOGLE_CLIENT_ID"
-          value_source { secret_key_ref { secret = google_secret_manager_secret.secret["google-client-id"].secret_id version = "latest" } }
+        dynamic "env" {
+          for_each = each.key == "publisher" ? {
+            GOOGLE_CLIENT_ID     = "google-client-id"
+            GOOGLE_CLIENT_SECRET = "google-client-secret"
+          } : {}
+          content {
+            name = env.key
+            value_source { secret_key_ref { secret = google_secret_manager_secret.secret[env.value].secret_id version = "latest" } }
+          }
         }
-        env {
-          name = "GOOGLE_CLIENT_SECRET"
-          value_source { secret_key_ref { secret = google_secret_manager_secret.secret["google-client-secret"].secret_id version = "latest" } }
+        dynamic "env" {
+          for_each = each.key == "analysis" ? { SAG_VIDEO_TRANSCRIPTION_API_KEY = "transcription-api-key" } : {}
+          content {
+            name = env.key
+            value_source { secret_key_ref { secret = google_secret_manager_secret.secret[env.value].secret_id version = "latest" } }
+          }
         }
         env { name = "YOUTUBE_KMS_KEY" value = google_kms_crypto_key.youtube.id }
         resources { limits = { cpu = each.value.cpu, memory = each.value.memory } }
@@ -323,8 +373,23 @@ resource "google_cloud_scheduler_job" "reconcile" {
     }
   }
 }
+resource "google_cloud_scheduler_job" "cleanup" {
+  name      = "${local.prefix}-cleanup"
+  region    = var.region
+  schedule  = "17 3 * * *"
+  time_zone = "Etc/UTC"
+  http_target {
+    uri         = "${google_cloud_run_v2_service.dispatcher.uri}/api/internal/cleanup"
+    http_method = "POST"
+    oidc_token {
+      service_account_email = google_service_account.service["task-invoker"].email
+      audience                = google_cloud_run_v2_service.dispatcher.uri
+    }
+  }
+}
 
 resource "google_cloud_run_v2_service_iam_member" "web_public" {
+  count    = var.external_beta_enabled ? 1 : 0
   name     = google_cloud_run_v2_service.web.name
   location = var.region
   role     = "roles/run.invoker"
@@ -343,7 +408,7 @@ resource "google_cloud_run_v2_service_iam_member" "engine_web" {
   member   = "serviceAccount:${google_service_account.service["web"].email}"
 }
 resource "google_project_iam_member" "cloudsql" {
-  for_each = toset(["web", "engine", "intake", "analysis", "render", "observer", "publisher"])
+  for_each = toset(["web", "engine", "dispatcher", "intake", "analysis", "render", "observer", "publisher"])
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${google_service_account.service[each.key].email}"
@@ -359,10 +424,7 @@ resource "google_project_iam_member" "web_tasks" {
   member  = "serviceAccount:${google_service_account.service["web"].email}"
 }
 resource "google_secret_manager_secret_iam_member" "secret_access" {
-  for_each = {
-    for pair in setproduct(keys(google_secret_manager_secret.secret), ["web", "engine", "dispatcher", "intake", "analysis", "render", "observer", "publisher"]) :
-    "${pair[0]}:${pair[1]}" => { secret = pair[0], service = pair[1] }
-  }
+  for_each  = local.secret_access
   secret_id = google_secret_manager_secret.secret[each.value.secret].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.service[each.value.service].email}"
@@ -379,7 +441,7 @@ resource "google_service_account_iam_member" "dispatcher_job_identity" {
   member             = "serviceAccount:${google_service_account.service["dispatcher"].email}"
 }
 resource "google_storage_bucket_iam_member" "media_access" {
-  for_each = { web = "roles/storage.objectUser", engine = "roles/storage.objectUser", intake = "roles/storage.objectUser", analysis = "roles/storage.objectViewer", render = "roles/storage.objectUser", observer = "roles/storage.objectViewer", publisher = "roles/storage.objectViewer" }
+  for_each = { web = "roles/storage.objectUser", engine = "roles/storage.objectViewer", dispatcher = "roles/storage.objectUser", intake = "roles/storage.objectUser", analysis = "roles/storage.objectViewer", render = "roles/storage.objectUser", observer = "roles/storage.objectViewer", publisher = "roles/storage.objectViewer" }
   bucket = google_storage_bucket.media.name
   role   = each.value
   member = "serviceAccount:${google_service_account.service[each.key].email}"

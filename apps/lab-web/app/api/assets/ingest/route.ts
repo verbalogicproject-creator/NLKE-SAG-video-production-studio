@@ -56,6 +56,13 @@ export async function POST(request: Request) {
         state: 'DISPATCH_PENDING',
         requestId: `intake:${current.id}:${object.generation}`,
         canonicalEntityId: asset.id,
+        inputVersion: 'sag-intake-1',
+        inputSnapshot: {
+          workspaceId, controlProjectId: current.projectId, assetId: asset.id,
+          object: { provider: object.provider, bucket: object.bucket, key: object.objectKey, generation: object.generation },
+          expectedSizeBytes: object.sizeBytes.toString(), expectedMimeType: current.expectedMimeType,
+          originalFilename: current.originalFilename,
+        },
         outbox: { create: {} },
       } });
       await tx.uploadSession.update({ where: { id: current.id }, data: {

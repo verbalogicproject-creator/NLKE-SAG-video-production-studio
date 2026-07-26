@@ -14,6 +14,7 @@ from uuid import uuid4
 from .models import Asset, MediaImportResult, Project, Receipt, ReceiptStatus, TICKS_PER_SECOND, utc_now
 from .store import Store
 from .repository import MediaBlobRecord
+from .blob_storage import BlobStorage, FilesystemBlobStorage, StorageLocator, StoredBlob
 
 
 ALLOWED_SUFFIXES = {
@@ -58,6 +59,7 @@ class MediaService:
         proxy_dir: str | Path,
         *,
         upload_limit_bytes: int,
+        blob_storage: BlobStorage | None = None,
         max_duration_seconds: float = 7200,
         max_pixels: int = 33_177_600,
         timeout_seconds: float = 90,
@@ -67,6 +69,7 @@ class MediaService:
         self.proxy_dir = Path(proxy_dir).resolve()
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_dir.mkdir(parents=True, exist_ok=True)
+        self.blob_storage = blob_storage or FilesystemBlobStorage(self.media_dir.parent / "storage")
         self.upload_limit_bytes = upload_limit_bytes
         self.max_duration_seconds = max_duration_seconds
         self.max_pixels = max_pixels
@@ -105,7 +108,19 @@ class MediaService:
                 owner_asset = owner.asset(blob.storage_asset_id)
             except KeyError as error:
                 raise MediaIntakeError("content-addressed media blob is missing") from error
-            path = self._managed_path(owner.id, owner_asset)
+            if blob.storage_backend and blob.storage_namespace and blob.storage_key:
+                try:
+                    path = self.blob_storage.materialize(
+                        StorageLocator(
+                            blob.storage_backend, blob.storage_namespace, blob.storage_key, blob.storage_version,
+                        ),
+                        identity=blob.id,
+                        expected_sha256=blob.sha256,
+                    )
+                except (FileNotFoundError, ValueError) as error:
+                    raise MediaIntakeError("content-addressed media bytes are unavailable") from error
+            else:
+                path = self._managed_path(owner.id, owner_asset)
             if _sha256(path) != blob.sha256:
                 raise MediaIntakeError("content-addressed media bytes changed")
             return path
@@ -280,6 +295,8 @@ class MediaService:
         claimed_mime: str | None,
         request_id: str,
         actor: str,
+        asset_id_override: str | None = None,
+        source_storage_override: StoredBlob | None = None,
     ) -> MediaImportResult:
         duplicate = self.store.receipt_for_request(project_id, request_id)
         if duplicate:
@@ -348,7 +365,7 @@ class MediaService:
                     },
                 )
                 return MediaImportResult(receipt=receipt, asset=duplicate_asset)
-            asset_id = f"asset_{uuid4().hex[:16]}"
+            asset_id = self._validate_id(asset_id_override) if asset_id_override else f"asset_{uuid4().hex[:16]}"
             kind = "video" if video else "audio"
             asset = Asset(
                 id=asset_id,
@@ -385,13 +402,27 @@ class MediaService:
             staged = None
             proxy_asset, thumbnail_asset = self._create_derivatives(project_id, final_source, asset, bool(video))
             for managed_asset in (asset, proxy_asset, thumbnail_asset):
+                managed_path = self._managed_path(project_id, managed_asset)
+                stored = source_storage_override if managed_asset is asset and source_storage_override else self.blob_storage.put_immutable(
+                    managed_path, workspace_id=project.workspace_id or project_id,
+                    project_id=project_id, identity=managed_asset.id,
+                    category="derived" if managed_asset.source_kind == "derived" else "media",
+                    content_type=managed_asset.mime_type, expected_sha256=managed_asset.sha256 or "",
+                )
+                if stored.sha256 != managed_asset.sha256 or stored.byte_size != managed_asset.byte_size:
+                    raise MediaIntakeError("promoted source storage differs from independently inspected bytes")
                 blob = self.store.register_media_blob(MediaBlobRecord(
                     id=f"blob_{managed_asset.sha256[:24]}", sha256=managed_asset.sha256 or "",
                     byte_size=managed_asset.byte_size or 0, mime_type=managed_asset.mime_type,
                     storage_project_id=project_id, storage_asset_id=managed_asset.id,
                     storage_kind=managed_asset.source_kind,
+                    storage_backend=stored.locator.backend,
+                    storage_namespace=stored.locator.namespace,
+                    storage_key=stored.locator.key,
+                    storage_version=stored.locator.version,
                 ))
                 managed_asset.blob_id = blob.id
+                managed_asset.managed_uri = f"sag-blob://{blob.id}"
                 if (blob.storage_project_id,blob.storage_asset_id) != (project_id,managed_asset.id):
                     duplicate_path = self._managed_path(project_id,managed_asset)
                     duplicate_path.unlink(missing_ok=True)

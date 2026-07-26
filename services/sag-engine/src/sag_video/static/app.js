@@ -43,7 +43,7 @@ async function api(path, options = {}) {
 
 function requestId(prefix) { return `${prefix}-${crypto.randomUUID()}`; }
 function allItems() { return state.project?.tracks.flatMap((track) => track.items) || []; }
-function videoItems() { return allItems().filter((item) => item.kind === "video" && assetById(item.asset_id)?.managed_uri).sort((a, b) => a.start_ticks - b.start_ticks); }
+function videoItems() { return allItems().filter((item) => item.kind === "video" && assetById(item.asset_id)).sort((a, b) => a.start_ticks - b.start_ticks); }
 function activeVideoItem(ticks = state.playheadTicks) { return videoItems().find((item) => ticks >= item.start_ticks && ticks < item.start_ticks + item.duration_ticks) || null; }
 function selectedItem() { return allItems().find((item) => state.selection.includes(item.id)); }
 function assetById(assetId) { return state.project?.assets.find((asset) => asset.id === assetId); }
@@ -138,6 +138,8 @@ function drawMonitor() {
   monitor.style.aspectRatio = `${state.project.canvas.width} / ${state.project.canvas.height}`;
   const video = $("preview-video");
   const resultVideo = $("result-video");
+  const placeholder = $("monitor-placeholder");
+  placeholder.hidden = true;
   if (state.resultUrl) {
     if (resultVideo.dataset.url !== state.resultUrl) {
       resultVideo.src = state.resultUrl;
@@ -180,9 +182,25 @@ function drawMonitor() {
     $("monitor-empty").textContent = videoItems().length ? "Timeline gap" : "Insert an observed video asset";
     $("transform-box").hidden = true;
     state.previewItemId = null;
+    updateTitleVisibility();
+    updateCaptionVisibility();
     return;
   }
   const asset = assetById(item.asset_id);
+  if (!asset.managed_uri) {
+    video.pause();
+    video.hidden = true;
+    video.removeAttribute("src");
+    video.dataset.itemId = "";
+    placeholder.querySelector("strong").textContent = asset.name;
+    placeholder.hidden = false;
+    $("monitor-empty").hidden = true;
+    $("transform-box").hidden = true;
+    state.previewItemId = item.id;
+    updateTitleVisibility();
+    updateCaptionVisibility();
+    return;
+  }
   const src = asset.proxy_asset_id
     ? `/api/projects/${state.project.id}/assets/${asset.id}/proxy`
     : `/api/projects/${state.project.id}/assets/${asset.id}/content`;
@@ -246,7 +264,8 @@ function drawTimeline() {
   const timelineWidth = Math.max(720, Math.round(720 * zoom / 5));
   $("tracks").style.minWidth = `${timelineWidth}px`;
   const ruler = document.querySelector(".ruler");
-  ruler.style.minWidth = `${timelineWidth}px`;
+  ruler.style.width = `${timelineWidth - 130}px`;
+  ruler.style.minWidth = `${timelineWidth - 130}px`;
   ruler.innerHTML = Array.from({ length: 7 }, (_, index) => `<span>${timeLabel(Math.round(duration * index / 6))}</span>`).join("");
   $("tracks").innerHTML = state.project.tracks.map((track) => `<div class="track"><div class="track-label"><strong>${escapeHtml(track.name)}</strong><span>${track.kind}</span></div><div class="track-lane" data-track="${track.id}"><span class="lane-playhead"></span>${track.items.map((item) => {
     const left = item.start_ticks / duration * 100;
@@ -463,7 +482,12 @@ function syncVideoToPlayhead(autoPlay = false) {
   const item = previewableItem();
   const video = $("preview-video");
   if (!item) {
-    if (video.dataset.itemId) drawMonitor();
+    if (state.previewItemId) drawMonitor();
+    return;
+  }
+  const asset = assetById(item.asset_id);
+  if (!asset?.managed_uri) {
+    if (state.previewItemId !== item.id) drawMonitor();
     return;
   }
   if (video.dataset.itemId !== item.id) {
@@ -481,14 +505,14 @@ function syncVideoToPlayhead(autoPlay = false) {
 function updateTitleVisibility() {
   const title = allItems().find((entry) => entry.kind === "title");
   if (!title) return;
-  const active = state.playheadTicks >= title.start_ticks && state.playheadTicks <= title.start_ticks + title.duration_ticks;
+  const active = state.playheadTicks >= title.start_ticks && state.playheadTicks < title.start_ticks + title.duration_ticks;
   $("preview-title").style.visibility = active ? "visible" : "hidden";
 }
 
 function updateCaptionVisibility() {
   const node = $("caption-preview");
   const caption = allItems().find((entry) => entry.kind === "caption");
-  if (!caption || state.playheadTicks < caption.start_ticks || state.playheadTicks > caption.start_ticks + caption.duration_ticks) {
+  if (!caption || state.playheadTicks < caption.start_ticks || state.playheadTicks >= caption.start_ticks + caption.duration_ticks) {
     node.hidden = true;
     return;
   }
@@ -953,16 +977,31 @@ $("copy-pair-command").onclick = async () => {
   }
 };
 
-document.querySelectorAll("[data-pane]").forEach((button) => {
-  button.onclick = () => {
-    document.querySelectorAll("[data-pane]").forEach((entry) => {
-      entry.classList.toggle("active", entry === button);
-      if (entry === button) entry.setAttribute("aria-current", "true");
-      else entry.removeAttribute("aria-current");
+function activateMobilePane(button, scroll = true) {
+  document.querySelectorAll("[data-pane]").forEach((entry) => {
+    const active = entry === button;
+    entry.classList.toggle("active", active);
+    entry.setAttribute("aria-selected", String(active));
+    if (active) entry.setAttribute("aria-current", "true");
+    else entry.removeAttribute("aria-current");
+  });
+  document.querySelectorAll(".workspace > .panel").forEach((pane) => {
+    pane.classList.toggle("mobile-pane-active", pane.id === button.dataset.pane);
+  });
+  sessionStorage.setItem("sag-video-mobile-pane", button.dataset.pane);
+  if (scroll && matchMedia("(max-width: 800px)").matches) {
+    window.scrollTo({
+      top: 0,
+      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     });
-    document.querySelector(`.${button.dataset.pane}`).scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-});
+  }
+  if (button.dataset.pane === "stage" && state.project) requestAnimationFrame(drawMonitor);
+}
+
+const paneButtons = [...document.querySelectorAll("[data-pane]")];
+paneButtons.forEach((button) => { button.onclick = () => activateMobilePane(button); });
+const rememberedPane = sessionStorage.getItem("sag-video-mobile-pane");
+activateMobilePane(paneButtons.find((button) => button.dataset.pane === rememberedPane) || paneButtons[0], false);
 window.addEventListener("resize", () => state.project && drawMonitor());
 
 load({ projects: true }).catch((error) => toast(error.message, true));

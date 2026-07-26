@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
+  transpilePackages: ['three'],
   serverExternalPackages: [
     '@google-cloud/storage',
     '@google-cloud/tasks',

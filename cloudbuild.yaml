@@ -3,6 +3,22 @@ substitutions:
   _REPOSITORY: sag-staging-images
 steps:
   - name: gcr.io/cloud-builders/docker
+    args: [run, -d, --name, sag-test-postgres, --network, cloudbuild, -e, POSTGRES_PASSWORD=test, postgres:16]
+  - name: postgres:16
+    entrypoint: sh
+    args: [-c, 'until pg_isready -h sag-test-postgres -U postgres; do sleep 1; done']
+  - name: node:22-bookworm-slim
+    entrypoint: sh
+    env: ['DATABASE_URL=postgresql://postgres:test@sag-test-postgres:5432/postgres']
+    args: [-c, 'corepack enable && pnpm install --frozen-lockfile && pnpm typecheck && pnpm build && pnpm --filter @verbalogix/web exec prisma validate --schema=../../prisma/schema.prisma && pnpm db:deploy']
+  - name: python:3.12-slim
+    entrypoint: sh
+    env: ['SAG_TEST_POSTGRES_URL=postgresql://postgres:test@sag-test-postgres:5432/postgres']
+    args: [-c, 'apt-get update -qq && apt-get install -y -qq ffmpeg libpq5 >/dev/null && pip install --quiet ./services/sag-engine[dev] && cd services/sag-engine && pytest']
+  - name: hashicorp/terraform:1.9
+    entrypoint: sh
+    args: [-c, 'terraform -chdir=deploy/terraform fmt -check && terraform -chdir=deploy/terraform init -backend=false && terraform -chdir=deploy/terraform validate']
+  - name: gcr.io/cloud-builders/docker
     args: [build, -f, deploy/Dockerfile.engine, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/engine:$COMMIT_SHA', .]
   - name: gcr.io/cloud-builders/docker
     args: [build, -f, deploy/Dockerfile.web, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/web:$COMMIT_SHA', .]

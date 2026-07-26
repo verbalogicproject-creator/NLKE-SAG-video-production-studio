@@ -1,6 +1,96 @@
 # Implementation status
 
-Updated: July 23, 2026
+Updated: July 24, 2026
+
+## Unified Studio and SAG Spatial Runtime
+
+The foundational spatial runtime slice is implemented and verified locally:
+
+- `npm run sag-server` starts only the authoritative FastAPI semantic engine on
+  port 8080. Next.js remains a separate consumer.
+- Equivalent SQLite migration 9 and PostgreSQL migration 5 add versioned event
+  definitions, bounded runtime events, cursor indexes, and active Studio depth.
+  SQLite migrations 10–11 and PostgreSQL migrations 6–7 add protected
+  provider connections plus engine-owned delivery profiles, approvals, and
+  publication attempts.
+- SQLite migration 12 and PostgreSQL migration 8 add the provider-neutral
+  `sag-journal/0.1-draft` kind registry, per-scope chain heads, and append-only
+  tamper-evident entries.
+- Event manifests reconcile by stable ID and source hash. Released schema drift
+  fails closed. Payload redaction removes token, credential, prompt, secret,
+  media-byte, and unrestricted-output fields before persistence.
+- Cursor history, resumable SSE, keepalives, invalid/pruned-cursor reset,
+  persisted polling fallback, and same-origin authenticated Next proxy routes
+  are present. PostgreSQL uses LISTEN/NOTIFY only as a latency-reducing wake
+  hint; persisted cursor polling remains the correctness path.
+- Provider-neutral spatial contracts cover entities, edges, snapshots, deltas,
+  viewport state, directives, and observed-effect ACKs. Projection IDs,
+  hierarchy, X/Y/Z coordinates, causal edges, and hashes are deterministic.
+- Snapshot, neighborhood, blast-radius, delta, runtime-history, runtime-stream,
+  directive, and ACK HTTP endpoints are implemented with project/workspace
+  scoping. MCP exposes snapshot, focus, hierarchy, neighborhood, blast radius,
+  directive dispatch, and receipt verification over the same API.
+- Registry coverage is checked at application startup. Redo now walks explicit
+  canonical history rather than toggling undo, and magnetic/ripple moves use
+  the same declared timeline command across HTTP, CLI, MCP, and Studio.
+- Studio has persistent Edit, Context, and System depths. Selection,
+  breadcrumbs, hierarchy, inspector, runtime state, Codex pause, and directive
+  ACKs share one controller. Context/System use an accessible keyboard tree and
+  optionally load React Three Fiber 9, Drei, and Three.js in separate chunks.
+- Portrait mobile defaults to the complete semantic tree. WebGL absence or
+  renderer failure leaves the hierarchy and inspector available.
+- Browser capture uses OPFS chunk spooling with interrupted-file recovery when
+  supported and a bounded 96 MB memory fallback otherwise.
+- Governance now surfaces real delivery profiles, release approvals,
+  publication-attempt counts, actors, scopes, and causal receipts without
+  exposing secrets.
+- Provider-neutral BYOK connection metadata and protected ciphertext live in
+  the engine. Secret material is service-only and excluded from runtime events,
+  receipts, and spatial metadata.
+- Release approval and dispatch remain human/scoped gates in Next, but their
+  canonical rows and receipts now live in the engine. The old Prisma delivery
+  tables are legacy migration sources only; `pnpm migrate:delivery` previews an
+  idempotent service-only transfer and `pnpm migrate:delivery -- --apply`
+  performs it.
+- The SAG-owned half of X1 now has a draft adapter and executable fixtures:
+  stable `sag://` entity URIs, digest-derived edge URIs, bounded provenance,
+  canonical graph hashes, and deterministic URI-based structural neighborhoods.
+  It is explicitly `0.1-draft`; framework-owned `rrf_sources` and
+  `sag.context_load` schemas plus the remaining journal freeze decisions must
+  reconcile before this is called shared X1.
+- The independent SAG journal adapter now reproduces all four framework
+  `sqlite3-sag` fixtures byte-for-byte: both pinned clean hashes, duplicate-ID
+  no-op, content tamper detection, and sequence-gap detection. Production
+  namespaces use the complete canonical `scope_uri`; register-before-emit and
+  no-float/no-bytes/credential payload gates are enforced. This observes the
+  delivered X1-CLAUDE-002 fixture subset, while the four joint-freeze questions
+  and broader X1 contract remain draft.
+- The newly delivered X1-CLAUDE-001/003 schemas are consumed through bounded
+  `RRFSourceEvidence`, `ContextNodeReceipt`, and `ContextLoadReceipt` models.
+  Contract discovery publishes their JSON schemas; kept context nodes require
+  anchors and non-empty evidence, and selection receipts enforce budget sums,
+  blind-load savings, and ordered anchors. Four newly frozen journal §13
+  fixtures also pass independently: Unicode-distinct content, float refusal,
+  canonical namespace binding, and receipt/observation metadata round-trip.
+
+Fresh evidence on this worktree: the full Python suite passes with one expected
+skip, Prisma validates and generates, TypeScript typecheck passes, the
+production Next build succeeds, and the Studio first-load route excludes the
+separate 3D chunks.
+
+Still pending before the complete release-candidate story can be claimed:
+
+- live PostgreSQL LISTEN/NOTIFY wakeup and multi-instance latency evidence;
+- a browser E2E suite at 375, 768, 1024, and 1440 pixels plus screen-reader and
+  WebGL context-loss runs;
+- live PostgreSQL verification of retained-revision spatial deltas and pruning
+  reset behavior (the SQLite implementation and fixtures pass locally);
+- execution and reconciliation of the legacy Prisma delivery migration against
+  a backed-up staging database;
+- framework-side X1 schema delivery and cross-implementation fixture
+  reconciliation (the SAG-only draft adapter is locally green, not shared-observed);
+- live end-to-end import, edit, render, verification, release, publication,
+  Codex directive, ACK, reconnect, and mobile acceptance evidence.
 
 ## GCP beta control-plane foundation
 
@@ -21,11 +111,20 @@ The repository now includes the production-facing control-plane foundation:
 - A focused Chamber edit surface for trims, hook titles, caption style and
   position, crop framing, gain, mute, revision readback, render, and evidence.
 
-This is not yet an externally admissible beta. The Python SAG runtime still
-uses its SQLite/filesystem adapter, so the Cloud Run job definitions must not be
-enabled until the PostgreSQL SAG repository, GCS media/artifact adapter,
-one-shot canonical job runner, importer, and database migration drill are
-implemented and pass the cloud acceptance suite.
+The production implementation now includes the Python PostgreSQL repository,
+provider-neutral filesystem/GCS blob storage, one-shot intake/analysis/render/
+observer jobs, and a resumable SQLite/filesystem importer. Canonical jobs freeze
+versioned inputs, are claimed transactionally, heartbeat leases, honor
+cancellation, and dispatch observation under a separately permissioned identity.
+Render output is promoted under an immutable GCS generation and independently
+checked for bytes, media shape, decoded frames, audio, captions, and loudness.
+
+This is still not externally admissible. Terraform deliberately defaults both
+cloud execution and public admission off, and refuses public admission without
+regional Cloud SQL HA. A correctly isolated staging GCP project must still pass
+the real image builds, importer drill, English/Hebrew creator loop, restart and
+persistence check, ten-workspace/two-heavy-job load test, backup restore drill,
+and exactly-once private YouTube retry scenario.
 
 ## Baseline
 
@@ -93,7 +192,15 @@ Phases 0–2 and the normalized persistence gate are implemented:
 
 ## Verification
 
-- Automated suite: 38 tests, including the shorts and Codex-link authority additions.
+- The local suite now covers the complete engine contract, storage immutability,
+  importer planning, and identical SQLite/PostgreSQL repository behavior. The
+  PostgreSQL gate also contests one job from two connections to prove an atomic
+  claim.
+- A fresh Prisma migration was applied to PostgreSQL and exercised with the real
+  generated client. Cloud Build now repeats both Prisma-owned control migrations
+  and Python-owned SAG migrations before building all three production images.
+- Cloud acceptance and load harnesses are checked into `scripts/`; their reports
+  are runtime evidence and must not be substituted by local mocks.
 - Legacy blob migration, restart reconstruction, rollback, job recovery,
   provider neutrality, SQLite integrity, and foreign keys are covered.
 - Live local server: contract discovery returned HTTP 200; CLI MP4 import
@@ -133,8 +240,9 @@ render with punctuation and Hebrew title text, and a mixed Hebrew/English
 active-caption render with a time-varying crop path.
 
 Remaining hardening includes wrong-dimension fixtures, richer FFmpeg progress,
-output caption/loudness predicates, a curated human clip-quality benchmark,
-and longer target-phone thermal testing.
+a curated human clip-quality benchmark, and longer target-phone thermal
+testing. Output caption-contrast and integrated-loudness predicates are now
+part of independent observation.
 
 The persistence contract is frozen for Phase 3 in `docs/persistence-spec.md`.
 The pre-normalization live database backup is retained alongside the development
@@ -163,11 +271,14 @@ configuration.
   prerequisites. The complete acceptance prompt and gates are documented in
   `docs/codex-sag-link.md`.
 
-Recalibrated execution order:
+Production admission order:
 
-1. Run the live Codex semantic edit/render/receipt acceptance.
-2. Install a multilingual whisper.cpp model and run the first real English and
-   Hebrew talking-head discovery benchmarks.
-3. Tune clip scoring and face framing against the curated benchmark.
-4. Add output caption/loudness observation and phone thermal measurements.
-5. Evaluate B-roll and publishing only after three measured creator-loop runs.
+1. Build immutable images and apply migrations in an isolated staging project.
+2. Dry-run, import, resume, and verify a copy of the current local database and
+   media roots.
+3. Run the English/Hebrew cloud creator-loop harness, restart all services, and
+   confirm the same revisions, receipts, artifact hashes, and observations.
+4. Run the ten-workspace isolation/fairness test and a Cloud SQL restore drill.
+5. Prove a simulated ambiguous retry produces exactly one private YouTube video.
+6. Admit three internal workspaces, review monitoring and cost for a week, then
+   consider expanding to ten.

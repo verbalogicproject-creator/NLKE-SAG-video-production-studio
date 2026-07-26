@@ -15,23 +15,40 @@ export async function POST(request: Request) {
   try {
     if (!isAuthorized(request)) return NextResponse.json({ error: 'forbidden' }, { status: 403 });
     const { canonicalJobId } = BodySchema.parse(await request.json());
-    const claimed = await db.canonicalJob.updateMany({
-      where: {
-        id: canonicalJobId,
-        OR: [
-          { state: { in: ['QUEUED', 'DISPATCH_PENDING', 'INTERRUPTED'] } },
-          { state: 'CLAIMED', leaseExpiresAt: { lt: new Date() } },
-        ],
-      },
-      data: {
-        state: 'CLAIMED',
-        claimedBy: request.headers.get('x-cloudtasks-taskname') ?? 'local-dispatch',
-        claimedAt: new Date(),
-        leaseExpiresAt: new Date(Date.now() + 15 * 60_000),
-        attempt: { increment: 1 },
-      },
+    if (process.env.CLOUD_EXECUTION_ENABLED !== 'true') {
+      return NextResponse.json({ error: 'cloud_execution_disabled' }, { status: 503 });
+    }
+    const outcome = await db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('sag-heavy-dispatch'))`;
+      const pending = await tx.canonicalJob.findUnique({ where: { id: canonicalJobId }, select: { kind: true } });
+      if (!pending) return 'missing' as const;
+      if (['ANALYSIS', 'RENDER'].includes(pending.kind)) {
+        const activeHeavy = await tx.canonicalJob.count({
+          where: { kind: { in: ['ANALYSIS', 'RENDER'] }, state: { in: ['CLAIMED', 'RUNNING'] } },
+        });
+        if (activeHeavy >= Number(process.env.GLOBAL_HEAVY_JOB_LIMIT ?? '2')) return 'saturated' as const;
+      }
+      const claimed = await tx.canonicalJob.updateMany({
+        where: {
+          id: canonicalJobId,
+          OR: [
+            { state: { in: ['QUEUED', 'DISPATCH_PENDING', 'INTERRUPTED'] } },
+            { state: 'CLAIMED', leaseExpiresAt: { lt: new Date() } },
+          ],
+        },
+        data: {
+          state: 'CLAIMED',
+          claimedBy: request.headers.get('x-cloudtasks-taskname') ?? 'local-dispatch',
+          claimedAt: new Date(),
+          leaseExpiresAt: new Date(Date.now() + 15 * 60_000),
+          attempt: { increment: 1 },
+        },
+      });
+      return claimed.count ? 'claimed' as const : 'duplicate' as const;
     });
-    if (!claimed.count) return NextResponse.json({ duplicate: true }, { status: 200 });
+    if (outcome === 'missing') return NextResponse.json({ error: 'job_not_found' }, { status: 404 });
+    if (outcome === 'saturated') return NextResponse.json({ error: 'global_heavy_job_limit' }, { status: 429 });
+    if (outcome === 'duplicate') return NextResponse.json({ duplicate: true }, { status: 200 });
     const job = await db.canonicalJob.findUniqueOrThrow({ where: { id: canonicalJobId } });
     try {
       const operation = await startCloudRunJob(job.kind, job.id);
