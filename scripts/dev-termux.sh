@@ -12,7 +12,8 @@ if [ -f "$REPO_DIR/.env.local" ]; then
   set +a
 fi
 
-: "${DATABASE_URL:=postgresql://localhost:5432/verbalogix_chamber}"
+LOCAL_DATABASE_USER=$(id -un)
+: "${DATABASE_URL:=postgresql://$LOCAL_DATABASE_USER@localhost:5432/verbalogix_chamber}"
 : "${SAG_VIDEO_SERVICE_TOKEN:=local-chamber-service}"
 : "${SAG_ENGINE_URL:=http://127.0.0.1:8080}"
 : "${VERBALOGIX_LOCAL_DEV:=1}"

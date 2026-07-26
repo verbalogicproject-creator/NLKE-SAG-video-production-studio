@@ -34,6 +34,8 @@ sh scripts/dev-termux.sh
 ```
 
 Open `http://127.0.0.1:3000/dashboard`. Local mode creates an isolated development user and workspace; it must never be enabled in a public deployment.
+Use the launcher instead of starting the web package directly: it loads the root
+environment and binds Prisma to the current Termux PostgreSQL role.
 
 ## Verification
 
