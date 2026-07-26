@@ -18,9 +18,10 @@ type Props = {
  * Height is locked at 48px to preserve the panel grid rhythm.
  */
 export function TimecodeBar({ workspace, channel = '01/04', live = false, className }: Props) {
-  const [now, setNow] = useState<string>(() => utcClock());
+  const [now, setNow] = useState<string>('00:00:00');
 
   useEffect(() => {
+    setNow(utcClock());
     const id = setInterval(() => setNow(utcClock()), 1000);
     return () => clearInterval(id);
   }, []);

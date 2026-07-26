@@ -22,9 +22,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     forwarded.set('actor', 'verbalogix-web');
     const result = await sagEngine.upload(workspaceId, project.engineProjectId, forwarded) as {
       asset?: Record<string, unknown>;
-      receipt?: { project_revision?: number };
+      receipt?: {
+        project_revision?: number;
+        payload?: {
+          observation?: { findings?: Array<{ summary?: string }> };
+        };
+      };
     };
-    if (!result.asset) throw new Error('Engine did not return an imported asset');
+    if (!result.asset) {
+      const message = result.receipt?.payload?.observation?.findings?.[0]?.summary
+        ?? 'Captured media failed canonical observation.';
+      return NextResponse.json(jsonSafe({ error: 'media_observation_failed', message, engine: result }), { status: 422 });
+    }
     const engineAsset = result.asset;
     const upload = uploadAssetId ? await db.uploadSession.findFirst({
       where: { assetId: uploadAssetId, projectId: id, workspaceId, status: 'ISSUED', expiresAt: { gt: new Date() } },

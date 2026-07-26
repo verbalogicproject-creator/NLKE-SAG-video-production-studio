@@ -32,3 +32,19 @@ def tiny_audio(path: Path, *, duration: float = 0.6) -> Path:
         timeout=30,
     )
     return path
+
+
+def browser_capture(path: Path, *, duration: float = 0.8) -> Path:
+    """Create a MediaRecorder-like live WebM with no finalized duration metadata."""
+    subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-y", "-v", "error",
+            "-f", "lavfi", "-i", f"color=c=0x17213a:s=320x180:r=30:d={duration}",
+            "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={duration}",
+            "-shortest", "-c:v", "libvpx", "-c:a", "libopus", "-f", "webm", "-live", "1", str(path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    return path

@@ -682,20 +682,27 @@ function HierarchyTree({
 
 function CaptureControl({ projectId, onComplete }: { projectId: string; onComplete: () => Promise<void> }) {
   const [mode, setMode] = useState<'screen' | 'camera' | 'microphone' | 'screen_camera'>('screen');
-  const [recording, setRecording] = useState(false);
+  const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>('environment');
+  const [phase, setPhase] = useState<'idle' | 'requesting' | 'recording' | 'stopping' | 'importing' | 'error'>('idle');
   const [message, setMessage] = useState('Capture starts only after your browser permission.');
   const [recoverable, setRecoverable] = useState<CompletedCapture[]>([]);
+  const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const recorders = useRef<Array<{
     recorder: MediaRecorder; name: string; stream: MediaStream;
     spool: CaptureSpool; writeQueue: Promise<void>;
   }>>([]);
+  const previewRef = useRef<HTMLVideoElement>(null);
   const startedAt = useRef(0);
   const limitTimer = useRef<number | null>(null);
+  const stopping = useRef(false);
+  const recording = phase === 'recording';
+  const captureBusy = phase === 'requesting' || phase === 'stopping' || phase === 'importing';
 
-  async function recorderFor(stream: MediaStream, name: string) {
-    const recorder = new MediaRecorder(stream, MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-      ? { mimeType: 'video/webm;codecs=vp9,opus' } : undefined);
-    const spool = await createCaptureSpool(name, recorder.mimeType || 'video/webm');
+  async function recorderFor(stream: MediaStream, name: string, includesVideo: boolean) {
+    const mimeType = preferredCaptureMimeType(includesVideo);
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    const spool = await createCaptureSpool(name, recorder.mimeType || (includesVideo ? 'video/webm' : 'audio/webm'));
     const entry = { recorder, name, stream, spool, writeQueue: Promise.resolve() };
     recorder.ondataavailable = (event) => {
       if (!event.data.size) return;
@@ -706,27 +713,54 @@ function CaptureControl({ projectId, onComplete }: { projectId: string; onComple
     };
     recorder.start(1000);
     recorders.current.push(entry);
+    stream.getTracks().forEach((track) => track.addEventListener('ended', () => {
+      if (!stopping.current && recorders.current.includes(entry)) void stop();
+    }, { once: true }));
   }
 
   async function start() {
-    if (!navigator.mediaDevices || typeof MediaRecorder === 'undefined') {
+    if (!window.isSecureContext) {
+      setPhase('error');
+      setMessage('Camera capture requires HTTPS or 127.0.0.1. Open this Studio from a secure origin.');
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setPhase('error');
       setMessage('Browser capture is unavailable. Use the system recorder, then import the saved file.');
       return;
     }
     try {
+      setPhase('requesting');
+      setMessage('Waiting for browser permission.');
       recorders.current = [];
       if (mode === 'screen' || mode === 'screen_camera') {
         if (!navigator.mediaDevices.getDisplayMedia) {
+          setPhase('error');
           setMessage('Screen capture is unavailable here. Use the Android system recorder, then import the file.');
           return;
         }
-        await recorderFor(await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }), 'screen');
+        const screen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        await recorderFor(screen, 'screen', true);
+        if (mode === 'screen') setPreviewStream(screen);
       }
       if (mode === 'camera' || mode === 'screen_camera') {
-        await recorderFor(await navigator.mediaDevices.getUserMedia({ video: true, audio: mode === 'camera' }), 'camera');
+        const camera = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: cameraFacing },
+            width: { ideal: 1920 }, height: { ideal: 1080 },
+            frameRate: { ideal: 30, max: 30 },
+          },
+          audio: mode === 'camera' ? { echoCancellation: true, noiseSuppression: true } : false,
+        });
+        await recorderFor(camera, 'camera', true);
+        setPreviewStream(camera);
       }
-      if (mode === 'microphone') await recorderFor(await navigator.mediaDevices.getUserMedia({ audio: true }), 'microphone');
-      startedAt.current = Date.now(); setRecording(true);
+      if (mode === 'microphone') await recorderFor(await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      }), 'microphone', false);
+      startedAt.current = Date.now();
+      setElapsedSeconds(0);
+      setPhase('recording');
       setMessage(recorders.current.every((entry) => entry.spool.persistent)
         ? 'Recording to recoverable device storage. Stop to import managed tracks.'
         : 'Recording with a bounded memory fallback. Stop to import managed tracks.');
@@ -734,21 +768,30 @@ function CaptureControl({ projectId, onComplete }: { projectId: string; onComple
     } catch (cause) {
       recorders.current.forEach((entry) => entry.stream.getTracks().forEach((track) => track.stop()));
       recorders.current = [];
+      setPreviewStream(null);
+      setPhase('error');
       setMessage(cause instanceof Error ? cause.message : 'Capture permission was not granted.');
     }
   }
 
   async function stop() {
+    if (stopping.current || !recorders.current.length) return;
+    stopping.current = true;
+    setPhase('stopping');
     if (limitTimer.current) window.clearTimeout(limitTimer.current);
-    const completed = await Promise.all(recorders.current.map((entry) => new Promise<CompletedCapture>((resolve, reject) => {
-      const finish = () => { void entry.writeQueue.then(() => entry.spool.finish()).then(resolve, reject); };
-      entry.recorder.onstop = finish;
-      if (entry.recorder.state === 'inactive') finish();
-      else entry.recorder.stop();
-      entry.stream.getTracks().forEach((track) => track.stop());
-    })));
-    setRecording(false); setMessage('Importing captured tracks.');
     try {
+      const activeRecorders = recorders.current;
+      recorders.current = [];
+      const completed = await Promise.all(activeRecorders.map((entry) => new Promise<CompletedCapture>((resolve, reject) => {
+        const finish = () => { void entry.writeQueue.then(() => entry.spool.finish()).then(resolve, reject); };
+        entry.recorder.onstop = finish;
+        if (entry.recorder.state === 'inactive') finish();
+        else entry.recorder.stop();
+        entry.stream.getTracks().forEach((track) => track.stop());
+      })));
+      setPreviewStream(null);
+      setPhase('importing');
+      setMessage('Importing captured tracks.');
       for (const entry of completed) {
         if (!entry.blob.size) continue;
         const form = new FormData();
@@ -758,10 +801,16 @@ function CaptureControl({ projectId, onComplete }: { projectId: string; onComple
         await entry.cleanup();
       }
       await onComplete();
+      setPhase('idle');
       setMessage(`Capture imported. ${Math.max(1, Math.round((Date.now() - startedAt.current) / 1000))} seconds recorded.`);
     } catch (cause) {
+      setPhase('error');
       setMessage(cause instanceof Error ? cause.message : 'Capture import failed.');
-    } finally { recorders.current = []; }
+    } finally {
+      recorders.current = [];
+      setPreviewStream(null);
+      stopping.current = false;
+    }
   }
 
   useEffect(() => {
@@ -772,32 +821,75 @@ function CaptureControl({ projectId, onComplete }: { projectId: string; onComple
     };
   }, []);
 
+  useEffect(() => {
+    if (!previewRef.current) return;
+    previewRef.current.srcObject = previewStream;
+    if (previewStream) void previewRef.current.play().catch(() => undefined);
+  }, [previewStream]);
+
+  useEffect(() => {
+    if (!recording) return;
+    const timer = window.setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startedAt.current) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [recording]);
+
   async function recover(entry: CompletedCapture) {
+    setPhase('importing');
     setMessage('Importing recovered capture.');
     const form = new FormData();
     form.set('file', new File([entry.blob], entry.fileName, { type: entry.blob.type || 'video/webm' }));
     const response = await fetch(`/api/projects/${projectId}/assets/upload`, { method: 'POST', body: form });
-    if (!response.ok) { setMessage('Recovered capture import failed. The device copy was kept.'); return; }
+    if (!response.ok) {
+      setPhase('error');
+      setMessage('Recovered capture import failed. The device copy was kept.');
+      return;
+    }
     await entry.cleanup();
     setRecoverable((current) => current.filter((candidate) => candidate.fileName !== entry.fileName));
     await onComplete();
+    setPhase('idle');
     setMessage('Recovered capture imported.');
   }
 
   return <div className="studio-capture">
     <label htmlFor="capture-mode">Capture source</label>
-    <select id="capture-mode" value={mode} disabled={recording} onChange={(event) => setMode(event.target.value as typeof mode)}>
+    <select id="capture-mode" value={mode} disabled={recording || captureBusy} onChange={(event) => setMode(event.target.value as typeof mode)}>
       <option value="screen">Screen and system audio</option><option value="camera">Camera and microphone</option>
       <option value="microphone">Microphone</option><option value="screen_camera">Screen plus camera</option>
     </select>
-    <button className={`studio-button ${recording ? 'danger' : 'primary'}`} onClick={() => void (recording ? stop() : start())}>
-      {recording ? <><Square size={13} />Stop capture</> : <><Camera size={13} />Start capture</>}
+    {(mode === 'camera' || mode === 'screen_camera') ? <>
+      <label htmlFor="capture-facing">Camera</label>
+      <select id="capture-facing" value={cameraFacing} disabled={recording || captureBusy} onChange={(event) => setCameraFacing(event.target.value as typeof cameraFacing)}>
+        <option value="environment">Back camera</option><option value="user">Front camera</option>
+      </select>
+    </> : null}
+    {previewStream ? <div className="studio-capture-preview">
+      <video ref={previewRef} muted autoPlay playsInline aria-label={mode === 'screen' ? 'Live screen preview' : 'Live camera preview'} />
+      <div><span>{phase === 'recording' ? 'Recording' : 'Preview'}</span><time>{formatCaptureDuration(elapsedSeconds)}</time></div>
+    </div> : null}
+    <button className={`studio-button ${recording ? 'danger' : 'primary'}`} disabled={captureBusy} onClick={() => void (recording ? stop() : start())}>
+      {phase === 'requesting' ? <><LoaderCircle className="animate-spin" size={13} />Permission</> :
+        phase === 'stopping' ? <><LoaderCircle className="animate-spin" size={13} />Finalizing</> :
+          phase === 'importing' ? <><LoaderCircle className="animate-spin" size={13} />Importing</> :
+            recording ? <><Square size={13} />Stop capture</> : <><Camera size={13} />Start capture</>}
     </button>
     {recoverable.map((entry) => <button key={entry.fileName} className="studio-button secondary" onClick={() => void recover(entry)}>
       <Upload size={13} />Recover interrupted capture
     </button>)}
     <p role="status">{message}</p>
   </div>;
+}
+
+function preferredCaptureMimeType(includesVideo: boolean): string {
+  if (typeof MediaRecorder.isTypeSupported !== 'function') return '';
+  const candidates = includesVideo
+    ? ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4']
+    : ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? '';
+}
+
+function formatCaptureDuration(value: number): string {
+  return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
 }
 
 function PanelHeading({ icon, title, action }: { icon: React.ReactNode; title: string; action?: React.ReactNode }) {

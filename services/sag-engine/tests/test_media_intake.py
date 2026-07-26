@@ -1,6 +1,7 @@
+import hashlib
 from io import BytesIO
 
-from media_fixtures import tiny_audio, tiny_video
+from media_fixtures import browser_capture, tiny_audio, tiny_video
 
 
 def _upload(client, path, request_id="upload-request-0001", name=None):
@@ -66,6 +67,25 @@ def test_broken_media_becomes_observed_failure(client, tmp_path):
     assert response.json()["asset"] is None
     assert response.json()["receipt"]["status"] == "observed_failure"
     assert str(tmp_path) not in response.text
+
+
+def test_browser_webm_without_duration_is_normalized_and_observed(client, tmp_path):
+    source = browser_capture(tmp_path / "camera.webm")
+    incoming_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    response = _upload(client, source, "upload-browser-camera-0001")
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["receipt"]["status"] == "observed_success"
+    asset = result["asset"]
+    assert asset["kind"] == "video"
+    assert asset["intake_status"] == "observed_valid"
+    assert asset["duration_ticks"] > 0
+    assert asset["sha256"] != incoming_sha256
+    assert asset["observation_summary"]["container_normalized"] is True
+    assert asset["observation_summary"]["incoming_sha256"] == incoming_sha256
+    assert asset["proxy_asset_id"] and asset["thumbnail_asset_id"]
 
 
 def test_unsupported_and_traversal_filenames_fail_closed(client):

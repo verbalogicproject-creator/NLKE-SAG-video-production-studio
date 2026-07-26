@@ -16,6 +16,61 @@ async function assertNoHorizontalDrift(page: Page) {
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport + 1);
 }
 
+test('hydrates the live timecode from a deterministic server snapshot', async ({ page }) => {
+  const hydrationErrors: string[] = [];
+  page.on('pageerror', (error) => {
+    if (/hydration|server rendered html/i.test(error.message)) hydrationErrors.push(error.message);
+  });
+  await page.goto(studioPath());
+  await expect(page.locator('header').first()).toContainText(/\d{2}:\d{2}:\d{2} UTC/);
+  await page.waitForTimeout(1100);
+  expect(hydrationErrors).toEqual([]);
+});
+
+test('records a camera preview and imports the capture through managed media intake', async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockMediaRecorder {
+      static isTypeSupported() { return true; }
+      state: RecordingState = 'inactive';
+      mimeType: string;
+      ondataavailable: ((event: BlobEvent) => unknown) | null = null;
+      onstop: ((event: Event) => unknown) | null = null;
+      constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+        this.mimeType = options?.mimeType ?? 'video/webm';
+      }
+      start() { this.state = 'recording'; }
+      stop() {
+        this.state = 'inactive';
+        this.ondataavailable?.({ data: new Blob(['camera-capture'], { type: this.mimeType }) } as BlobEvent);
+        queueMicrotask(() => this.onstop?.(new Event('stop')));
+      }
+    }
+    Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: MockMediaRecorder });
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
+      getUserMedia: async () => new MediaStream(),
+      getDisplayMedia: async () => new MediaStream(),
+    } });
+    if (navigator.storage) Object.defineProperty(navigator.storage, 'getDirectory', { configurable: true, value: undefined });
+  });
+  let imports = 0;
+  await page.route('**/api/projects/*/assets/upload', async (route) => {
+    imports += 1;
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ asset: { id: 'capture-e2e' } }) });
+  });
+  await page.goto(studioPath());
+  if ((page.viewportSize()?.width ?? 1000) < 768) await page.getByRole('button', { name: 'Media', exact: true }).click();
+  await page.getByRole('button', { name: 'Capture', exact: true }).click();
+  await page.getByLabel('Capture source').selectOption('camera');
+  await page.getByLabel('Camera').selectOption('environment');
+  await page.getByRole('button', { name: 'Start capture' }).click();
+  await expect(page.getByLabel('Live camera preview')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Stop capture' })).toBeVisible();
+  await page.getByRole('button', { name: 'Stop capture' }).click();
+  await expect(page.getByRole('status')).toContainText('Capture imported.');
+  expect(imports).toBe(1);
+  await assertNoHorizontalDrift(page);
+});
+
 test('preserves semantic selection across Edit, Context, and System', async ({ page }) => {
   await page.goto(studioPath());
   await expect(page.getByRole('button', { name: 'Edit' })).toBeVisible();

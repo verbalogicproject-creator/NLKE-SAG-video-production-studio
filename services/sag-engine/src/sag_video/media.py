@@ -21,6 +21,7 @@ ALLOWED_SUFFIXES = {
     ".mp4", ".m4v", ".mov", ".webm", ".mkv",
     ".m4a", ".mp3", ".wav", ".ogg", ".opus", ".aac",
 }
+DURATION_ERROR = "media duration is missing, zero, or exceeds the configured limit"
 
 
 class MediaIntakeError(ValueError):
@@ -187,12 +188,38 @@ class MediaService:
             except (TypeError, ValueError):
                 continue
         if duration <= 0 or duration > self.max_duration_seconds:
-            raise MediaIntakeError("media duration is missing, zero, or exceeds the configured limit")
+            raise MediaIntakeError(DURATION_ERROR)
         if videos:
             width, height = int(videos[0].get("width") or 0), int(videos[0].get("height") or 0)
             if width <= 0 or height <= 0 or width * height > self.max_pixels:
                 raise MediaIntakeError("video dimensions are missing or exceed the configured pixel limit")
         return {"probe": probe, "videos": videos, "audios": audios, "duration": duration}
+
+    def _normalize_browser_webm(self, path: Path) -> None:
+        """Finalize a bounded live WebM so ffprobe can observe its duration."""
+        normalized = path.with_name(f"{path.stem}-normalized.webm")
+        try:
+            try:
+                result = subprocess.run(
+                    [
+                        "ffmpeg", "-nostdin", "-y", "-v", "error", "-fflags", "+genpts",
+                        "-i", str(path), "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy",
+                        "-avoid_negative_ts", "make_zero", str(normalized),
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=self.timeout_seconds,
+                    text=True,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise MediaIntakeError(f"browser capture normalization failed: {error}") from error
+            if result.returncode != 0 or not normalized.is_file():
+                raise MediaIntakeError("browser capture normalization failed")
+            if normalized.stat().st_size > self.upload_limit_bytes:
+                raise MediaIntakeError(f"upload exceeds {self.upload_limit_bytes} byte limit")
+            os.replace(normalized, path)
+        finally:
+            normalized.unlink(missing_ok=True)
 
     def _run_ffmpeg(self, command: list[str]) -> None:
         try:
@@ -322,7 +349,18 @@ class MediaService:
         source_dir: Path | None = None
         try:
             staged, digest, byte_size = self._stage_stream(project_id, source, suffix)
-            details = self._probe(staged)
+            incoming_sha256 = digest
+            container_normalized = False
+            try:
+                details = self._probe(staged)
+            except MediaIntakeError as error:
+                if suffix != ".webm" or str(error) != DURATION_ERROR:
+                    raise
+                self._normalize_browser_webm(staged)
+                digest = _sha256(staged)
+                byte_size = staged.stat().st_size
+                details = self._probe(staged)
+                container_normalized = True
             video = details["videos"][0] if details["videos"] else None
             audio = details["audios"][0] if details["audios"] else None
             duplicate_asset = next(
@@ -393,6 +431,8 @@ class MediaService:
                     "has_video": bool(video),
                     "has_audio": bool(audio),
                     "claimed_mime_type": claimed_mime,
+                    "container_normalized": container_normalized,
+                    "incoming_sha256": incoming_sha256,
                 },
             )
             source_dir = self._asset_dir(self.media_dir, project_id, asset_id)

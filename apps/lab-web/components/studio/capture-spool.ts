@@ -30,7 +30,7 @@ async function spoolDirectory(): Promise<DirectoryHandle | null> {
 
 export async function createCaptureSpool(name: string, mimeType: string): Promise<CaptureSpool> {
   const directory = await spoolDirectory().catch(() => null);
-  const fileName = `${Date.now()}-${crypto.randomUUID()}-${name}.webm`;
+  const fileName = `${Date.now()}-${crypto.randomUUID()}-${name}.${captureExtension(mimeType)}`;
   if (directory) {
     const handle = await directory.getFileHandle(fileName, { create: true });
     let position = 0;
@@ -67,6 +67,12 @@ export async function createCaptureSpool(name: string, mimeType: string): Promis
   };
 }
 
+function captureExtension(mimeType: string): 'webm' | 'mp4' | 'm4a' {
+  if (mimeType.startsWith('audio/mp4')) return 'm4a';
+  if (mimeType.includes('mp4')) return 'mp4';
+  return 'webm';
+}
+
 export async function recoverCaptureSpools(): Promise<CompletedCapture[]> {
   const directory = await spoolDirectory().catch(() => null);
   if (!directory) return [];
@@ -75,10 +81,18 @@ export async function recoverCaptureSpools(): Promise<CompletedCapture[]> {
     if (handle.kind !== 'file') continue;
     const file = await handle.getFile();
     if (!file.size) continue;
+    const mimeType = recoveredMimeType(handle.name);
     recovered.push({
-      blob: file, fileName: handle.name,
+      blob: file.slice(0, file.size, file.type || mimeType), fileName: handle.name,
       cleanup: () => directory.removeEntry(handle.name),
     });
   }
   return recovered;
+}
+
+function recoveredMimeType(fileName: string): string {
+  if (fileName.endsWith('.m4a')) return 'audio/mp4';
+  if (fileName.endsWith('.mp4')) return 'video/mp4';
+  if (fileName.includes('-microphone.')) return 'audio/webm';
+  return 'video/webm';
 }
