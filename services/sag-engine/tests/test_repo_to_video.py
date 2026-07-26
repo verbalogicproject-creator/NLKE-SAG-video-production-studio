@@ -17,6 +17,7 @@ from sag_video.repo_to_video import (
     redact,
     scene_generation_prompt,
     scene_negative_prompt,
+    storyboard_response_schema,
 )
 
 
@@ -36,6 +37,9 @@ def test_storyboard_prompt_has_bounded_evidence():
     request = RepoVideoRequest(repository_url="https://github.com/example/project")
     prompt = evidence_prompt(request, RepositoryEvidence(repository_url=request.repository_url, ref="main", name="example/project", readme="README"))
     assert "example/project" in prompt
+    assert "scene id must start with scene_" in prompt
+    assert "Use 8 to 10 scenes of 4 to 8 seconds each" in prompt
+    assert "Provider aspect ratio: 9:16" in prompt
     assert len(prompt) < 30000
 
 
@@ -93,6 +97,27 @@ def test_storyboard_requires_evidence_refs_and_fits_requested_duration():
         parse_storyboard(too_long, evidence=evidence, requested_duration_seconds=60)
 
 
+def test_storyboard_rejects_evidence_paths_outside_collected_snapshot():
+    evidence = RepositoryEvidence(
+        repository_url="https://github.com/example/project", ref="main", name="example/project",
+        files=["README.md", "src/engine.py"],
+    )
+    revision = evidence_revision(evidence)
+    raw = '{"title":"Demo","hook":"Try it","call_to_action":"Clone it","evidence_revision":"' + revision + '","scenes":[{"id":"scene_intro","start_seconds":0,"duration_seconds":5,"purpose":"hook","narration":"Try it","visual_direction":"show it","evidence_refs":["src/missing.py"]}]}'
+    with pytest.raises(ValueError, match="absent from collected evidence"):
+        parse_storyboard(raw, evidence=evidence, requested_duration_seconds=60)
+
+
+def test_storyboard_schema_limits_citations_to_collected_evidence():
+    evidence = RepositoryEvidence(
+        repository_url="https://github.com/example/project", ref="main", name="example/project",
+        files=["README.md", "src/engine.py"], manifests={"package.json": "{}"},
+    )
+    schema = storyboard_response_schema(evidence)
+    evidence_items = schema["$defs"]["StoryboardScene"]["properties"]["evidence_refs"]["items"]
+    assert evidence_items["enum"] == ["README.md", "package.json", "src/engine.py"]
+
+
 def test_trusted_web_proxy_requires_exact_human_confirmation(tmp_path):
     app = create_app(Settings(
         database_path=str(tmp_path / "sag.db"), artifact_dir=str(tmp_path / "artifacts"),
@@ -111,6 +136,30 @@ def test_trusted_web_proxy_requires_exact_human_confirmation(tmp_path):
     with TestClient(app) as client:
         denied = client.post(f"/api/projects/{project.id}/repo-to-video/storyboard/commit", headers=service_headers, json=body)
         assert denied.status_code == 403
+        generation_denied = client.post(
+            f"/api/projects/{project.id}/repo-to-video/generate",
+            headers={**service_headers, "x-sag-human-confirmation": confirmation_id},
+            json={
+                "storyboard_receipt_id": receipt.id,
+                "storyboard": {
+                    "title": "Demo", "hook": "Hook", "call_to_action": "Act", "evidence_revision": "evidence-1",
+                    "scenes": [{
+                        "id": "scene_one", "start_seconds": 0, "duration_seconds": 5, "purpose": "proof",
+                        "narration": "Proof", "visual_direction": "Static terminal", "evidence_refs": ["README.md"],
+                        "generation_model": "gemini-omni-flash-preview",
+                    }],
+                },
+                "creative_brief": {
+                    "title": "Demo", "logline": "Proof", "audience_promise": "Learn", "tone": "precise",
+                    "visual_language": "clean", "narrative_arc": ["hook", "proof", "cta"],
+                    "omni_prompt": "clean UI", "veo_prompt": "clean UI", "music_prompt": "pulse",
+                    "narration_guidance": "clear", "evidence_revision": "evidence-1",
+                },
+                "expected_revision": project.revision, "confirmation_id": confirmation_id, "aspect_ratio": "9:16",
+            },
+        )
+        assert generation_denied.status_code == 409
+        assert "not human-approved" in generation_denied.json()["detail"]
         accepted = client.post(
             f"/api/projects/{project.id}/repo-to-video/storyboard/commit",
             headers={**service_headers, "x-sag-human-confirmation": confirmation_id}, json=body,

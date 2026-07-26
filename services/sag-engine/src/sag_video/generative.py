@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import base64
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
@@ -92,6 +93,19 @@ def request_hash(request: BaseModel) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _provider_failure(error: Exception) -> RuntimeError:
+    detail = str(error)
+    lowered = detail.lower()
+    if "quota" in lowered or "rate limit" in lowered or "too_many_requests" in lowered or "429" in lowered:
+        return RuntimeError("quota_failure: Google generative quota is exhausted or rate-limited")
+    return RuntimeError(f"provider_failure: {detail[:500]}")
+
+
+def _is_quota_failure(error: Exception) -> bool:
+    lowered = str(error).lower()
+    return "quota" in lowered or "rate limit" in lowered or "too_many_requests" in lowered or "429" in lowered
+
+
 class GoogleGenerativeAdapter:
     """Adapter around the official Google GenAI client.
 
@@ -100,36 +114,98 @@ class GoogleGenerativeAdapter:
     never a successful mock response.
     """
 
-    def __init__(self, client: GoogleProviderClient | None = None, *, api_key: str | None = None):
+    def __init__(
+        self, client: GoogleProviderClient | None = None, *, api_key: str | None = None, backend: str | None = None,
+    ):
         self.client = client
         self.api_key = api_key if api_key is not None else (os.getenv("GEMINI_API_KEY") or _local_env_value("GEMINI_API_KEY"))
+        self.backend = (backend or os.getenv("SAG_GOOGLE_GENAI_BACKEND") or _local_env_value("SAG_GOOGLE_GENAI_BACKEND") or "auto").lower()
+        if self.backend not in {"auto", "developer", "vertex"}:
+            raise ValueError("SAG_GOOGLE_GENAI_BACKEND must be auto, developer, or vertex")
+        self._developer_sdk: GoogleProviderClient | None = None
+        self._vertex_sdk: GoogleProviderClient | None = None
 
     def _client(self) -> GoogleProviderClient:
         if self.client is not None:
             return self.client
+        if self.backend == "vertex" or (not self.api_key and self.backend == "auto"):
+            return self._vertex_client()
         if not self.api_key:
             raise RuntimeError("Google generative media is not configured: GEMINI_API_KEY or Vertex credentials required")
+        if self._developer_sdk is not None:
+            return self._developer_sdk
         try:
             from google import genai  # type: ignore
         except ImportError as error:
             raise RuntimeError("install the google-genai package to enable generative media") from error
         # Keep the SDK object behind the protocol. The concrete calls are
         # isolated here so provider SDK upgrades cannot leak into the engine.
-        return _SdkClient(genai.Client(api_key=self.api_key))
+        self._developer_sdk = _SdkClient(genai.Client(api_key=self.api_key))
+        return self._developer_sdk
+
+    def _vertex_client(self) -> GoogleProviderClient:
+        if self._vertex_sdk is not None:
+            return self._vertex_sdk
+        try:
+            from google import genai  # type: ignore
+            import google.auth  # type: ignore
+            from google.oauth2 import service_account  # type: ignore
+        except ImportError as error:
+            raise RuntimeError("install Google auth and google-genai packages to enable Vertex generative media") from error
+        credential_value = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or _local_env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        credentials: Any
+        discovered_project: str | None
+        if credential_value:
+            path = Path(credential_value).expanduser()
+            if not path.is_absolute():
+                repository_root = Path(__file__).resolve().parents[4]
+                candidates = (Path.cwd() / path, repository_root / path, repository_root.parent / path)
+                path = next((candidate for candidate in candidates if candidate.is_file()), path)
+            credentials = service_account.Credentials.from_service_account_file(
+                str(path), scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            discovered_project = getattr(credentials, "project_id", None)
+        else:
+            credentials, discovered_project = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+        project = os.getenv("GOOGLE_CLOUD_PROJECT") or _local_env_value("GOOGLE_CLOUD_PROJECT") or discovered_project
+        if not project:
+            raise RuntimeError("Vertex generative media requires GOOGLE_CLOUD_PROJECT or project-bearing ADC")
+        location = os.getenv("GOOGLE_GENAI_LOCATION") or _local_env_value("GOOGLE_GENAI_LOCATION") or "global"
+        self._vertex_sdk = _SdkClient(genai.Client(
+            vertexai=True, project=project, location=location, credentials=credentials,
+        ))
+        return self._vertex_sdk
+
+    def _call(self, method: str, **arguments: Any) -> Any:
+        try:
+            return getattr(self._client(), method)(**arguments)
+        except (RuntimeError, ValueError):
+            raise
+        except Exception as error:
+            if self.client is None and self.backend == "auto" and self.api_key and _is_quota_failure(error):
+                try:
+                    return getattr(self._vertex_client(), method)(**arguments)
+                except (RuntimeError, ValueError):
+                    raise
+                except Exception as fallback_error:
+                    raise _provider_failure(fallback_error) from fallback_error
+            raise _provider_failure(error) from error
 
     def start_video(self, request: GenerativeVideoRequest) -> ProviderOperation:
         validate_model_for(request.model, "video_generation")
-        operation_name = self._client().start_video(model=request.model, request=request)
+        operation_name = self._call("start_video", model=request.model, request=request)
         return ProviderOperation(request_id=f"gen_{request_hash(request)[:24]}", model=request.model, operation_name=operation_name)
 
     def start_audio(self, request: GenerativeAudioRequest) -> ProviderOperation:
         capability = "music_generation" if request.model.startswith("lyria-") else "text_to_speech"
         validate_model_for(request.model, capability)
-        operation_name = self._client().start_audio(model=request.model, request=request)
+        operation_name = self._call("start_audio", model=request.model, request=request)
         return ProviderOperation(request_id=f"gen_{request_hash(request)[:24]}", model=request.model, operation_name=operation_name)
 
     def poll(self, operation: ProviderOperation) -> ProviderOperation:
-        result = self._client().poll(operation_name=operation.operation_name)
+        result = self._call("poll", operation_name=operation.operation_name)
         state = result.get("state", "running")
         if state not in {"pending", "running", "completed", "failed"}:
             raise RuntimeError("provider returned an invalid operation state")
@@ -137,7 +213,7 @@ class GoogleGenerativeAdapter:
 
     def plan_text(self, *, model: str, prompt: str, response_schema: dict[str, Any] | None = None) -> str:
         validate_model_for(model, "multi_turn_interactions")
-        return self._client().plan_text(model=model, prompt=prompt, response_schema=response_schema)
+        return self._call("plan_text", model=model, prompt=prompt, response_schema=response_schema)
 
 
 class _SdkClient:
@@ -204,24 +280,96 @@ class _SdkClient:
         create = getattr(getattr(self.client, "interactions", None), "create", None)
         if create is None:
             raise RuntimeError("installed google-genai SDK does not expose Interactions API")
-        arguments: dict[str, Any] = {"model": model, "input": prompt}
+        arguments: dict[str, Any] = {
+            "model": model, "input": prompt, "background": False, "store": False, "stream": False,
+        }
         if response_schema is not None:
             arguments["response_format"] = {
-                "type": "text", "mime_type": "application/json", "schema": response_schema,
+                "type": "text", "mime_type": "application/json", "schema": _inline_json_schema(response_schema),
             }
-        interaction = create(**arguments)
-        outputs = getattr(interaction, "outputs", None) or []
-        for output in outputs:
-            text = getattr(output, "text", None)
+        getter = getattr(getattr(self.client, "interactions", None), "get", None)
+        last_status = "unknown"
+        for attempt in range(2):
+            if attempt:
+                arguments["input"] = prompt + "\n\nFinal instruction: emit the requested JSON object now; do not return an empty response."
+            interaction = create(**arguments)
+            text = _text_output(interaction)
             if text:
-                return str(text)
-        text = getattr(interaction, "text", None)
+                return text
+            identifier = getattr(interaction, "id", None) or getattr(interaction, "name", None)
+            last_status = str(getattr(interaction, "status", "")).lower() or "unknown"
+            for _ in range(5):
+                if not identifier or getter is None or last_status in {"completed", "succeeded", "done", "failed", "error"}:
+                    break
+                time.sleep(1)
+                interaction = getter(id=str(identifier).removeprefix("interactions/"))
+                text = _text_output(interaction)
+                if text:
+                    return text
+                last_status = str(getattr(interaction, "status", "")).lower() or "unknown"
+        raise RuntimeError(f"Omni interaction returned no text output (status={last_status})")
+
+
+def _inline_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline Pydantic local refs for the Interactions structured-output subset."""
+    definitions = schema.get("$defs", {})
+    supported_keywords = {
+        "type", "properties", "required", "additionalProperties", "items", "enum", "format",
+        "description", "anyOf", "oneOf",
+    }
+
+    def visit(value: Any, resolving: frozenset[str] = frozenset()) -> Any:
+        if isinstance(value, list):
+            return [visit(item, resolving) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.removeprefix("#/$defs/")
+            if name not in definitions or name in resolving:
+                raise ValueError("structured output schema contains an unresolved or recursive local reference")
+            merged = {**definitions[name], **{key: item for key, item in value.items() if key != "$ref"}}
+            return visit(merged, resolving | {name})
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key not in supported_keywords:
+                continue
+            if key == "properties" and isinstance(item, dict):
+                result[key] = {name: visit(property_schema, resolving) for name, property_schema in item.items()}
+            else:
+                result[key] = visit(item, resolving)
+        return result
+
+    result = visit(schema)
+    if not isinstance(result, dict):
+        raise ValueError("structured output schema must be an object")
+    return result
+
+
+def _text_output(value: Any) -> str | None:
+    """Read current and legacy Interactions text shapes without returning thoughts or user input."""
+    for attribute in ("output_text", "text"):
+        text = getattr(value, attribute, None)
         if text:
             return str(text)
-        output_text = getattr(interaction, "output_text", None)
-        if output_text:
-            return str(output_text)
-        raise RuntimeError("Omni interaction returned no text output")
+    outputs = getattr(value, "outputs", None) or []
+    for output in outputs:
+        text = getattr(output, "text", None)
+        if text:
+            return str(text)
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(exclude_none=True)
+    if not isinstance(value, dict):
+        return None
+    direct = value.get("output_text")
+    if direct:
+        return str(direct)
+    for step in reversed(value.get("steps", [])):
+        if isinstance(step, dict) and step.get("type") == "model_output":
+            for content in step.get("content", []):
+                if isinstance(content, dict) and content.get("type") == "text" and content.get("text"):
+                    return str(content["text"])
+    return None
 
 
 def _media_output(value: Any) -> dict[str, Any] | None:

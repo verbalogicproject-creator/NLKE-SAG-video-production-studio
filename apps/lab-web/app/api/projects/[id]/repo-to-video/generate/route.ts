@@ -14,6 +14,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const aspectRatio = body.aspect_ratio === '16:9' ? '16:9' : '9:16';
     return NextResponse.json(await sagEngine.generateRepoToVideo(workspaceId, engineProjectId, {
       storyboard: body.storyboard as Storyboard, creative_brief: body.creative_brief as CreativeBrief,
+      storyboard_receipt_id: String(body.storyboard_receipt_id),
       expected_revision: Number(body.expected_revision), confirmation_id: String(body.confirmation_id), aspect_ratio: aspectRatio,
     }));
   } catch (error) { return apiError(error); }

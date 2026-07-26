@@ -296,7 +296,7 @@ export const sagEngine = {
     engineFetch<{ receipt: EngineReceipt; idempotent?: boolean }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/storyboard/commit`, {
       method: 'POST', body: JSON.stringify(request), headers: { 'x-sag-human-confirmation': request.confirmation_id },
     }),
-  generateRepoToVideo: (workspaceId: string, projectId: string, request: { storyboard: Storyboard; creative_brief: CreativeBrief; expected_revision: number; confirmation_id: string; aspect_ratio: '9:16' | '16:9' }) =>
+  generateRepoToVideo: (workspaceId: string, projectId: string, request: { storyboard: Storyboard; creative_brief: CreativeBrief; storyboard_receipt_id: string; expected_revision: number; confirmation_id: string; aspect_ratio: '9:16' | '16:9' }) =>
     engineFetch<{ receipt: EngineReceipt; operations: GenerationOperation[] }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/generate`, {
       method: 'POST', body: JSON.stringify(request), headers: { 'x-sag-human-confirmation': request.confirmation_id },
     }),

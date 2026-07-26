@@ -1,6 +1,7 @@
 import pytest
 
-from sag_video.generative import GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter, ProviderOperation, _SdkClient, _media_output
+from sag_video.generative import GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter, ProviderOperation, _SdkClient, _inline_json_schema, _media_output, _text_output
+from sag_video.repo_to_video import RepoStoryboard
 
 
 class FakeClient:
@@ -25,7 +26,17 @@ def test_omni_video_is_real_operation_not_fake_completion():
 
 def test_missing_credentials_fail_closed():
     with pytest.raises(RuntimeError, match="not configured"):
-        GoogleGenerativeAdapter(api_key="").start_video(GenerativeVideoRequest(prompt="test"))
+        GoogleGenerativeAdapter(api_key="", backend="developer").start_video(GenerativeVideoRequest(prompt="test"))
+
+
+def test_provider_quota_failure_is_classified_without_leaking_full_detail():
+    class QuotaClient(FakeClient):
+        def plan_text(self, *, model, prompt, response_schema=None):
+            raise Exception("429 quota exceeded with verbose provider internals")
+
+    with pytest.raises(RuntimeError, match="quota_failure") as failure:
+        GoogleGenerativeAdapter(client=QuotaClient()).plan_text(model="gemini-omni-flash-preview", prompt="test")
+    assert "verbose provider internals" not in str(failure.value)
 
 
 def test_music_model_is_not_accepted_as_video():
@@ -72,5 +83,39 @@ def test_sdk_client_uses_structured_output_and_veo_negative_prompt():
     assert calls[-1]["config"]["negative_prompt"] == "watermark, distorted text"
 
 
+def test_structured_output_schema_inlines_pydantic_definitions():
+    schema = _inline_json_schema(RepoStoryboard.model_json_schema())
+    serialized = str(schema)
+    assert "$defs" not in serialized
+    assert "$ref" not in serialized
+    assert "default" not in serialized
+    assert "pattern" not in schema["properties"]["scenes"]["items"]["properties"]["id"]
+    assert "exclusiveMinimum" not in serialized
+
+
 def test_media_output_normalizes_inline_bytes():
     assert _media_output({"candidate": {"inline_data": {"data": b"media"}}}) == {"data_base64": "bWVkaWE="}
+
+
+def test_text_output_uses_model_step_not_user_or_thought_text():
+    value = {"steps": [
+        {"type": "user_input", "content": [{"type": "text", "text": "secret prompt"}]},
+        {"type": "thought", "content": [{"type": "text", "text": "internal"}]},
+        {"type": "model_output", "content": [{"type": "text", "text": '{"ready":true}'}]},
+    ]}
+    assert _text_output(value) == '{"ready":true}'
+
+
+def test_plan_text_retries_one_empty_completed_interaction():
+    calls = []
+    interactions = iter([
+        SdkValue(id="empty", status="completed", output_text=""),
+        SdkValue(id="ready", status="completed", output_text='{"ready":true}'),
+    ])
+    client = _SdkClient(SdkValue(interactions=SdkValue(
+        create=lambda **kwargs: calls.append(kwargs) or next(interactions),
+        get=lambda **_kwargs: SdkValue(id="empty", status="completed", output_text=""),
+    )))
+    assert client.plan_text(model="gemini-omni-flash-preview", prompt="test") == '{"ready":true}'
+    assert len(calls) == 2
+    assert "do not return an empty response" in calls[-1]["input"]

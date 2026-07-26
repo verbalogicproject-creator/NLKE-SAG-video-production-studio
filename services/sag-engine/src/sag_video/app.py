@@ -91,8 +91,10 @@ from .repo_to_video import (
     evidence_revision,
     parse_creative_brief,
     parse_storyboard,
+    proposal_revision,
     scene_generation_prompt,
     scene_negative_prompt,
+    storyboard_response_schema,
 )
 from .generation_materializer import materialize
 
@@ -611,18 +613,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raw = generative.plan_text(
                 model="gemini-omni-flash-preview",
                 prompt=evidence_prompt(body, evidence),
-                response_schema=RepoStoryboard.model_json_schema(),
+                response_schema=storyboard_response_schema(evidence),
             )
             storyboard = parse_storyboard(raw, evidence=evidence, requested_duration_seconds=body.duration_seconds)
         except (httpx.HTTPError, RuntimeError, ValueError) as error:
             raise HTTPException(422, f"storyboard proposal rejected: {error}") from error
         project = store.get_project(project_id)
-        request_id = f"storyboard_{evidence_revision(evidence)[:24]}"
+        request_id = f"storyboard_{evidence_revision(evidence)[:12]}_{proposal_revision(storyboard)[:12]}"
         receipt = store.create_receipt(
             project_id=project_id, command="media.propose_storyboard", status=ReceiptStatus.AWAITING_USER_CONSENT,
             request_id=request_id, actor=getattr(http_request.state, "actor", "browser"), project_revision=project.revision,
             payload={"provider": "google", "model": "gemini-omni-flash-preview", "evidence_revision": storyboard.evidence_revision,
-                     "scene_count": len(storyboard.scenes), "duration_seconds": sum(scene.duration_seconds for scene in storyboard.scenes)},
+                     "scene_count": len(storyboard.scenes), "duration_seconds": sum(scene.duration_seconds for scene in storyboard.scenes),
+                     "repository": {"url": evidence.repository_url, "ref": evidence.ref, "name": evidence.name},
+                     "storyboard": storyboard.model_dump(mode="json")},
         )
         _emit_receipt_transition(receipt)
         return {"storyboard": storyboard.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json")}
@@ -644,10 +648,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project = store.get_project(project_id)
         receipt = store.create_receipt(
             project_id=project_id, command="media.propose_creative_brief", status=ReceiptStatus.AWAITING_USER_CONSENT,
-            request_id=f"brief_{evidence_revision(evidence)[:24]}", actor=getattr(http_request.state, "actor", "browser"),
+            request_id=f"brief_{evidence_revision(evidence)[:12]}_{proposal_revision(brief)[:12]}", actor=getattr(http_request.state, "actor", "browser"),
             project_revision=project.revision,
             payload={"provider": "google", "model": "gemini-omni-flash-preview", "evidence_revision": brief.evidence_revision,
-                     "narrative_beats": len(brief.narrative_arc)},
+                     "narrative_beats": len(brief.narrative_arc),
+                     "repository": {"url": evidence.repository_url, "ref": evidence.ref, "name": evidence.name},
+                     "creative_brief": brief.model_dump(mode="json")},
         )
         _emit_receipt_transition(receipt)
         return {"brief": brief.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json"), "next_step": "review_brief_then_generate_storyboard"}
@@ -692,6 +698,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project = store.get_project(project_id)
         if project.revision != body.expected_revision:
             raise StaleRevisionError(body.expected_revision, project.revision)
+        try:
+            approval_receipt = store.get_receipt(body.storyboard_receipt_id)
+        except KeyError as error:
+            raise HTTPException(404, "approved storyboard receipt not found") from error
+        if approval_receipt.project_id != project_id or approval_receipt.command != "media.propose_storyboard":
+            raise HTTPException(404, "approved storyboard receipt not found")
+        if approval_receipt.status != ReceiptStatus.COMMITTED:
+            raise HTTPException(409, "storyboard receipt is not human-approved")
+        approved_payload = approval_receipt.payload.get("storyboard")
+        if not isinstance(approved_payload, dict):
+            raise HTTPException(409, "approved storyboard receipt has no bound storyboard")
+        try:
+            approved_storyboard = RepoStoryboard.model_validate(approved_payload)
+        except ValueError as error:
+            raise HTTPException(409, "approved storyboard receipt is malformed") from error
+        if proposal_revision(approved_storyboard) != proposal_revision(body.storyboard):
+            raise HTTPException(409, "requested storyboard differs from the human-approved proposal")
         if body.storyboard.evidence_revision != body.creative_brief.evidence_revision:
             raise HTTPException(409, "creative brief and storyboard evidence revisions differ")
         operations: list[dict[str, Any]] = []

@@ -59,6 +59,11 @@ needs first/last-frame control, extension, reference-image behavior, legacy
 pipeline compatibility, or a deliberately specialized cinematic shot. Veo
 Lite is an explicit preview choice, not a silent production default.
 
+With `SAG_GOOGLE_GENAI_BACKEND=auto`, local development uses the AI Studio key
+first and falls back to Vertex/ADC only when Google returns an explicit quota
+failure. Other ambiguous provider errors do not trigger failover, preventing a
+possibly accepted media operation from being submitted twice.
+
 Official reference: <https://ai.google.dev/gemini-api/docs/video>.
 
 ## Omni scene prompt contract
@@ -96,7 +101,8 @@ Official reference:
 
 1. Brief review may edit or save versions without authorizing generation.
 2. Storyboard approval is bound to the current project and evidence revisions.
-3. Scene generation requires the matching human confirmation.
+3. Scene generation requires the matching committed storyboard receipt and
+   rejects a payload whose content hash differs from the approved proposal.
 4. Provider output must be bounded HTTPS or inline media, then downloaded,
    hashed, imported, probed, observed, and inserted through canonical commands.
 5. Rendering validates the project revision and produces a hashed artifact.

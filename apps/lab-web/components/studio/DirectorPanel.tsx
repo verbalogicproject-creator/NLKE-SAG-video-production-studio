@@ -208,6 +208,7 @@ export function DirectorPanel({
       const confirmation_id = crypto.randomUUID();
       const body = await post('generate', {
         sequence_id: sequenceId, storyboard: session.storyboard, creative_brief: session.brief,
+        storyboard_receipt_id: session.storyboardReceipt?.id,
         expected_revision: projectRevision, confirmation_id,
         aspect_ratio: session.input.target_platform === 'youtube_16_9' ? '16:9' : '9:16',
       }, true);
