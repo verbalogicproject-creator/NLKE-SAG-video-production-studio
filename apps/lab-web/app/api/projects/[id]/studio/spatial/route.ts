@@ -1,20 +1,14 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
 import { apiError } from '@/lib/http';
 import { requireWorkspace } from '@/lib/workspace';
 import { sagEngine } from '@/lib/engine';
-
-async function target(id: string, workspaceId: string) {
-  const row = await db.project.findFirst({ where: { id, workspaceId } });
-  if (!row?.engineProjectId) throw Object.assign(new Error('Studio project is not initialized'), { status: 409 });
-  return row.engineProjectId;
-}
+import { studioEngineProject } from '@/lib/studio-target';
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { workspaceId } = await requireWorkspace();
     const { id } = await params;
-    const engineProjectId = await target(id, workspaceId);
+    const engineProjectId = await studioEngineProject(id, workspaceId);
     const query = new URL(request.url).searchParams;
     return NextResponse.json(await sagEngine.spatialSnapshot(workspaceId, engineProjectId, {
       focusId: query.get('focus_id'), depth: query.get('depth') ?? 'context',
@@ -29,7 +23,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const { workspaceId } = await requireWorkspace();
     const { id } = await params;
-    await target(id, workspaceId);
+    await studioEngineProject(id, workspaceId);
     const body = await request.json();
     if (body.operation !== 'ack') return NextResponse.json({ error: 'unsupported_spatial_operation' }, { status: 422 });
     return NextResponse.json(await sagEngine.acknowledgeSpatialDirective(

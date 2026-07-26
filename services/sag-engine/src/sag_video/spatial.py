@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .contracts import APPLICATION_ACTIONS
 from .models import Project, ReceiptStatus, TICKS_PER_SECOND, utc_now
@@ -16,6 +17,7 @@ from .runtime import RuntimeEventService, sanitize_payload
 
 PROJECTION_VERSION = "sag-spatial-1"
 SPATIAL_SCHEMA_VERSION = "1.0"
+SPATIAL_FRAME_SCHEMA_VERSION = "sag-spatial-frame/1.0"
 SemanticLayer = Literal["workspace", "project", "sequence", "creation", "composition", "runtime", "governance", "delivery"]
 RelationshipKind = Literal[
     "contains", "consumes", "derives_from", "overlaps", "blocks", "confirms",
@@ -106,6 +108,127 @@ class ViewportState(BaseModel):
     selected_ids: list[str] = Field(default_factory=list)
 
 
+class NormalizedRect(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+
+class ViewportMetrics(BaseModel):
+    width_css_px: int = Field(ge=1, le=16384)
+    height_css_px: int = Field(ge=1, le=16384)
+    device_pixel_ratio: float = Field(default=1, ge=0.25, le=8)
+    scroll_x_css_px: float = Field(default=0, ge=0, le=10_000_000)
+    scroll_y_css_px: float = Field(default=0, ge=0, le=10_000_000)
+
+
+class AdaptiveGrid(BaseModel):
+    coordinate_space: Literal["normalized_0_1"] = "normalized_0_1"
+    origin: Literal["top_left"] = "top_left"
+    columns: int = Field(ge=4, le=16)
+    rows: int = Field(ge=6, le=24)
+    target_cell_css_px: int = Field(default=80, ge=44, le=240)
+    cell_width_css_px: float = Field(ge=44)
+    cell_height_css_px: float = Field(ge=44)
+
+
+class SpatialRegionBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str = Field(min_length=8, max_length=160)
+    entity_id: str = Field(min_length=1, max_length=200)
+    role: str = Field(default="region", min_length=1, max_length=80)
+    label: str = Field(default="", max_length=240)
+    rect: NormalizedRect
+    cells: list[str] = Field(default_factory=list, max_length=64)
+    visible: bool = True
+    occluded: bool = False
+    eligible_action_ids: list[str] = Field(default_factory=list, max_length=24)
+    source: Literal["dom", "accessibility", "canvas", "manual", "gemini"] = "dom"
+    confidence: float = Field(default=1, ge=0, le=1)
+    protected: bool = False
+    evidence_refs: list[str] = Field(default_factory=list, max_length=16)
+
+
+class SpatialFrameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    frame_id: str = Field(pattern=r"^frame_[A-Za-z0-9_-]{8,120}$")
+    schema_version: Literal["sag-spatial-frame/1.0"] = SPATIAL_FRAME_SCHEMA_VERSION
+    canonical_revision: int = Field(ge=1)
+    projection_hash: str = Field(min_length=16, max_length=128)
+    runtime_cursor: int = Field(default=0, ge=0)
+    active_depth: Literal["edit", "context", "system"] = "edit"
+    viewport: ViewportMetrics
+    grid: AdaptiveGrid | None = None
+    bindings: list[SpatialRegionBinding] = Field(default_factory=list, max_length=64)
+    truncated_bindings: int = Field(default=0, ge=0)
+    media_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    redaction_state: Literal["metadata_only", "redacted", "not_applicable"] = "metadata_only"
+    session_id: str | None = Field(default=None, max_length=120)
+
+
+class SpatialFrame(SpatialFrameRequest):
+    workspace_id: str
+    project_id: str
+    sequence_id: str
+    generated_at: str = Field(default_factory=utc_now)
+    expires_at: str
+
+
+class SpatialRegionResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str | None = Field(default=None, max_length=200)
+    cell: str | None = Field(default=None, pattern=r"^[A-P](?:[1-9]|1[0-9]|2[0-4])$")
+    point: dict[Literal["x", "y"], float] | None = None
+    minimum_confidence: float = Field(default=0.5, ge=0, le=1)
+    include_occluded: bool = False
+
+
+class ActionRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["observer_only", "semantic_handler", "canonical_command", "coordinate_fallback"]
+    action: str = Field(min_length=1, max_length=160)
+    target_id: str | None = Field(default=None, max_length=200)
+    binding_id: str | None = Field(default=None, max_length=160)
+    confidence: float = Field(default=1, ge=0, le=1)
+    transformations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+
+
+class SpatialObservationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: str = Field(pattern=r"^observation_[A-Za-z0-9_-]{8,120}$")
+    before_frame_id: str = Field(pattern=r"^frame_[A-Za-z0-9_-]{8,120}$")
+    after_frame_id: str = Field(pattern=r"^frame_[A-Za-z0-9_-]{8,120}$")
+    expected_revision: int = Field(ge=1)
+    expected_projection_hash: str = Field(min_length=16, max_length=128)
+    directive_receipt_id: str | None = Field(default=None, max_length=160)
+    trace_id: str | None = Field(default=None, max_length=120)
+    changed_entity_ids: list[str] = Field(default_factory=list, max_length=64)
+    changed_cells: list[str] = Field(default_factory=list, max_length=128)
+    route: ActionRoute
+    findings: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    success: bool = True
+
+
+def adaptive_grid(viewport: ViewportMetrics, *, target_cell_css_px: int = 80) -> AdaptiveGrid:
+    columns = max(4, min(16, round(viewport.width_css_px / target_cell_css_px)))
+    rows = max(6, min(24, round(viewport.height_css_px / target_cell_css_px)))
+    while columns > 4 and viewport.width_css_px / columns < 44:
+        columns -= 1
+    while rows > 6 and viewport.height_css_px / rows < 44:
+        rows -= 1
+    return AdaptiveGrid(
+        columns=columns, rows=rows, target_cell_css_px=target_cell_css_px,
+        cell_width_css_px=viewport.width_css_px / columns,
+        cell_height_css_px=viewport.height_css_px / rows,
+    )
+
+
 class SpatialDirectiveRequest(BaseModel):
     action: str
     target_ids: list[str] = Field(default_factory=list, max_length=24)
@@ -114,6 +237,9 @@ class SpatialDirectiveRequest(BaseModel):
     trace_id: str | None = Field(default=None, max_length=120)
     expires_in_seconds: int = Field(default=30, ge=5, le=120)
     intended_observed_effect: dict[str, Any] = Field(default_factory=dict)
+    expected_frame_id: str | None = Field(default=None, pattern=r"^frame_[A-Za-z0-9_-]{8,120}$")
+    binding_id: str | None = Field(default=None, max_length=160)
+    preferred_interaction_route: Literal["semantic_handler", "coordinate_fallback"] = "semantic_handler"
 
 
 class SpatialDirective(BaseModel):
@@ -125,6 +251,9 @@ class SpatialDirective(BaseModel):
     receipt_id: str
     expires_at: str
     intended_observed_effect: dict[str, Any]
+    expected_frame_id: str | None = None
+    binding_id: str | None = None
+    preferred_interaction_route: Literal["semantic_handler", "coordinate_fallback"] = "semantic_handler"
 
 
 class SpatialDirectiveAck(BaseModel):
@@ -135,6 +264,11 @@ class SpatialDirectiveAck(BaseModel):
     renderer_mode: Literal["dom_tree", "webgl", "webgl_lod", "unavailable"]
     findings: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     success: bool = True
+    before_frame_id: str | None = Field(default=None, pattern=r"^frame_[A-Za-z0-9_-]{8,120}$")
+    after_frame_id: str | None = Field(default=None, pattern=r"^frame_[A-Za-z0-9_-]{8,120}$")
+    changed_entity_ids: list[str] = Field(default_factory=list, max_length=64)
+    changed_cells: list[str] = Field(default_factory=list, max_length=128)
+    action_route: ActionRoute | None = None
 
 
 def spatial_schemas() -> dict[str, Any]:
@@ -144,8 +278,186 @@ def spatial_schemas() -> dict[str, Any]:
         "SpatialSnapshot": SpatialSnapshot.model_json_schema(),
         "SpatialDelta": SpatialDelta.model_json_schema(),
         "ViewportState": ViewportState.model_json_schema(),
+        "AdaptiveGrid": AdaptiveGrid.model_json_schema(),
+        "SpatialRegionBinding": SpatialRegionBinding.model_json_schema(),
+        "SpatialFrame": SpatialFrame.model_json_schema(),
+        "SpatialObservationRequest": SpatialObservationRequest.model_json_schema(),
+        "ActionRoute": ActionRoute.model_json_schema(),
         "SpatialDirective": SpatialDirective.model_json_schema(),
     }
+
+
+VIEWPORT_AFFORDANCES: dict[str, set[str]] = {
+    "viewport:studio": {"spatial.reset_view"},
+    "viewport:studio-header": {"spatial.set_depth"},
+    "viewport:studio-depth-edit": {"spatial.set_depth"},
+    "viewport:studio-depth-context": {"spatial.set_depth"},
+    "viewport:studio-depth-system": {"spatial.set_depth"},
+    "viewport:media": {"spatial.frame_entity"},
+    "viewport:monitor": {"spatial.frame_entity"},
+    "viewport:timeline": {"spatial.frame_entity"},
+    "viewport:inspector": {"spatial.frame_entity"},
+    "viewport:director": {"spatial.frame_entity"},
+    "viewport:governance": {"spatial.frame_entity"},
+    "viewport:spatial-workspace": {"spatial.reset_view"},
+}
+
+SENSITIVE_COORDINATE_ACTION_PREFIXES = (
+    "connection.", "oauth.", "provider.", "release.", "publish.", "publication.",
+    "repo_to_video.generate", "generative.", "timeline.delete", "asset.delete",
+)
+
+
+class SpatialFrameService:
+    """Ephemeral binding plane over the canonical spatial projection."""
+
+    def __init__(self, store: Any, projection: "SpatialProjectionService", runtime: RuntimeEventService):
+        self.store = store
+        self.projection = projection
+        self.runtime = runtime
+
+    @staticmethod
+    def _cell_is_valid(cell: str, grid: AdaptiveGrid) -> bool:
+        if len(cell) < 2:
+            return False
+        column = ord(cell[0]) - ord("A")
+        try:
+            row = int(cell[1:]) - 1
+        except ValueError:
+            return False
+        return 0 <= column < grid.columns and 0 <= row < grid.rows
+
+    def declare(self, project_id: str, request: SpatialFrameRequest, *, actor: str) -> SpatialFrame:
+        snapshot = self.projection.snapshot(project_id, depth="system")
+        if snapshot.canonical_revision != request.canonical_revision:
+            from .models import StaleRevisionError
+            raise StaleRevisionError(request.canonical_revision, snapshot.canonical_revision)
+        if snapshot.projection_hash != request.projection_hash:
+            raise ValueError("stale spatial projection hash")
+        computed_grid = adaptive_grid(request.viewport)
+        if request.grid is not None and (
+            request.grid.columns != computed_grid.columns or request.grid.rows != computed_grid.rows
+        ):
+            raise ValueError("adaptive grid does not match the declared viewport")
+        known = {entity.id: set(entity.eligible_action_ids) for entity in snapshot.entities}
+        binding_ids: set[str] = set()
+        for binding in request.bindings:
+            if binding.binding_id in binding_ids:
+                raise ValueError("duplicate spatial binding id")
+            binding_ids.add(binding.binding_id)
+            if binding.rect.x + binding.rect.width > 1.000001 or binding.rect.y + binding.rect.height > 1.000001:
+                raise ValueError("spatial binding exceeds normalized viewport bounds")
+            allowed = known.get(binding.entity_id)
+            if allowed is None:
+                allowed = VIEWPORT_AFFORDANCES.get(binding.entity_id)
+            if allowed is None:
+                raise ValueError(f"unknown spatial binding entity: {binding.entity_id}")
+            if any(action not in allowed for action in binding.eligible_action_ids):
+                raise ValueError("spatial binding claims an ineligible action")
+            if any(not self._cell_is_valid(cell, computed_grid) for cell in binding.cells):
+                raise ValueError("spatial binding contains a cell outside the adaptive grid")
+            if binding.source == "gemini":
+                if os.getenv("SAG_GEMINI_OBSERVER_ENABLED", "").lower() not in {"1", "true", "yes"}:
+                    raise ValueError("Gemini spatial observation is disabled")
+                if request.redaction_state != "redacted":
+                    raise ValueError("Gemini bindings require an explicitly redacted frame")
+        body = request.model_copy(update={"grid": computed_grid}).model_dump(mode="json")
+        if len(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()) > 15_000:
+            raise ValueError("spatial frame declaration exceeds the bounded runtime payload")
+        project = self.store.get_project(project_id)
+        now = datetime.now(timezone.utc)
+        frame = SpatialFrame(
+            **body, workspace_id=str(project.workspace_id or project.id), project_id=project.id,
+            sequence_id=project.id, generated_at=now.isoformat(),
+            expires_at=(now + timedelta(days=7)).isoformat(),
+        )
+        self.runtime.emit(
+            workspace_id=frame.workspace_id, project_id=project.id, sequence_id=project.id,
+            revision=project.revision, actor=actor, kind="spatial.frame.declared",
+            session_id=frame.frame_id, payload={"frame": frame.model_dump(mode="json")},
+        )
+        if any(binding.source != "dom" for binding in frame.bindings):
+            self.runtime.emit(
+                workspace_id=frame.workspace_id, project_id=project.id, sequence_id=project.id,
+                revision=project.revision, actor=actor, kind="spatial.bindings.reconciled",
+                session_id=frame.frame_id, payload={
+                    "frame_id": frame.frame_id,
+                    "bindings": [
+                        {
+                            "binding_id": binding.binding_id, "entity_id": binding.entity_id,
+                            "source": binding.source, "confidence": binding.confidence,
+                        }
+                        for binding in frame.bindings if binding.source != "dom"
+                    ],
+                },
+            )
+        return frame
+
+    @staticmethod
+    def _frame_from_event(event: dict[str, Any] | None) -> SpatialFrame:
+        if event is None or not isinstance(event.get("payload", {}).get("frame"), dict):
+            raise KeyError("spatial frame not found")
+        return SpatialFrame.model_validate(event["payload"]["frame"])
+
+    def current(self, project_id: str) -> SpatialFrame:
+        return self._frame_from_event(self.store.latest_runtime_event(project_id, "spatial.frame.declared"))
+
+    def get(self, project_id: str, frame_id: str) -> SpatialFrame:
+        return self._frame_from_event(self.store.find_runtime_event(
+            project_id, "spatial.frame.declared", frame_id,
+        ))
+
+    def resolve(self, project_id: str, frame_id: str, request: SpatialRegionResolveRequest) -> dict[str, Any]:
+        frame = self.get(project_id, frame_id)
+        if sum(value is not None for value in (request.entity_id, request.cell, request.point)) != 1:
+            raise ValueError("resolve exactly one entity, cell, or point")
+        point = request.point
+        if point is not None and (
+            set(point) != {"x", "y"} or not 0 <= point["x"] <= 1 or not 0 <= point["y"] <= 1
+        ):
+            raise ValueError("resolve point must use normalized x and y")
+        matches = []
+        for binding in frame.bindings:
+            if binding.confidence < request.minimum_confidence or (binding.occluded and not request.include_occluded):
+                continue
+            selected = request.entity_id == binding.entity_id if request.entity_id is not None else False
+            selected = selected or (request.cell is not None and request.cell in binding.cells)
+            selected = selected or bool(point and (
+                binding.rect.x <= point["x"] <= binding.rect.x + binding.rect.width
+                and binding.rect.y <= point["y"] <= binding.rect.y + binding.rect.height
+            ))
+            if selected:
+                matches.append(binding)
+        matches.sort(key=lambda entry: (-entry.confidence, entry.rect.width * entry.rect.height, entry.entity_id))
+        return {
+            "frame_id": frame.frame_id, "canonical_revision": frame.canonical_revision,
+            "projection_hash": frame.projection_hash,
+            "matches": [entry.model_dump(mode="json") for entry in matches],
+        }
+
+    def observe(self, project_id: str, request: SpatialObservationRequest, *, actor: str) -> dict[str, Any]:
+        before = self.get(project_id, request.before_frame_id)
+        after = self.get(project_id, request.after_frame_id)
+        if before.canonical_revision != request.expected_revision or after.canonical_revision != request.expected_revision:
+            raise ValueError("spatial observation frame revision mismatch")
+        if before.projection_hash != request.expected_projection_hash:
+            raise ValueError("spatial observation before-frame projection mismatch")
+        if request.route.kind == "coordinate_fallback":
+            if request.route.action.startswith(SENSITIVE_COORDINATE_ACTION_PREFIXES):
+                raise ValueError("sensitive actions cannot use coordinate fallback")
+            if os.getenv("SAG_COORDINATE_FALLBACK_ENABLED", "").lower() not in {"1", "true", "yes"}:
+                raise ValueError("coordinate fallback is disabled")
+            if request.route.confidence < 0.95:
+                raise ValueError("coordinate fallback requires confidence of at least 0.95")
+        project = self.store.get_project(project_id)
+        payload = {"observation": request.model_dump(mode="json")}
+        event = self.runtime.emit(
+            workspace_id=str(project.workspace_id or project.id), project_id=project.id,
+            sequence_id=project.id, revision=project.revision, actor=actor,
+            kind="spatial.effect.observed", trace_id=request.trace_id,
+            session_id=request.observation_id, payload=payload,
+        )
+        return {"observation": request.model_dump(mode="json"), "event": event.model_dump(mode="json")}
 
 
 class SpatialProjectionService:
@@ -551,10 +863,14 @@ class SpatialProjectionService:
 
 
 class SpatialDirectiveService:
-    def __init__(self, store: Any, projection: SpatialProjectionService, runtime: RuntimeEventService):
+    def __init__(
+        self, store: Any, projection: SpatialProjectionService, runtime: RuntimeEventService,
+        frames: SpatialFrameService | None = None,
+    ):
         self.store = store
         self.projection = projection
         self.runtime = runtime
+        self.frames = frames
 
     def dispatch(self, project_id: str, request: SpatialDirectiveRequest, *, actor: str) -> tuple[Any, SpatialDirective]:
         declaration = APPLICATION_ACTIONS.get(request.action)
@@ -569,6 +885,25 @@ class SpatialDirectiveService:
         known = {entity.id for entity in snapshot.entities}
         if any(target not in known for target in request.target_ids):
             raise ValueError("spatial directive contains an unknown target")
+        if request.preferred_interaction_route == "coordinate_fallback":
+            if request.action.startswith(SENSITIVE_COORDINATE_ACTION_PREFIXES):
+                raise ValueError("sensitive actions cannot use coordinate fallback")
+            if os.getenv("SAG_COORDINATE_FALLBACK_ENABLED", "").lower() not in {"1", "true", "yes"}:
+                raise ValueError("coordinate fallback is disabled")
+        if request.binding_id and not request.expected_frame_id:
+            raise ValueError("a binding id requires an expected frame id")
+        if request.expected_frame_id:
+            if self.frames is None:
+                raise ValueError("spatial frame binding is unavailable")
+            frame = self.frames.get(project_id, request.expected_frame_id)
+            if frame.canonical_revision != request.expected_revision or frame.projection_hash != request.expected_projection_hash:
+                raise ValueError("stale spatial frame")
+            if request.binding_id:
+                binding = next((entry for entry in frame.bindings if entry.binding_id == request.binding_id), None)
+                if binding is None:
+                    raise ValueError("spatial binding not found in expected frame")
+                if request.target_ids and binding.entity_id not in request.target_ids:
+                    raise ValueError("spatial binding does not resolve to the directive target")
         trace_id = request.trace_id or f"trace_{uuid4().hex}"
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=request.expires_in_seconds)).isoformat()
         receipt = self.store.create_receipt(
@@ -578,6 +913,8 @@ class SpatialDirectiveService:
                 "target_ids": request.target_ids, "projection_hash": snapshot.projection_hash,
                 "trace_id": trace_id, "expires_at": expires_at,
                 "intended_observed_effect": sanitize_payload(request.intended_observed_effect),
+                "expected_frame_id": request.expected_frame_id, "binding_id": request.binding_id,
+                "preferred_interaction_route": request.preferred_interaction_route,
             },
         )
         receipt = self.store.update_receipt(receipt, ReceiptStatus.AWAITING_CONSUMER)
@@ -587,12 +924,26 @@ class SpatialDirectiveService:
             expected_projection_hash=request.expected_projection_hash,
             trace_id=trace_id, receipt_id=receipt.id, expires_at=expires_at,
             intended_observed_effect=sanitize_payload(request.intended_observed_effect),
+            expected_frame_id=request.expected_frame_id, binding_id=request.binding_id,
+            preferred_interaction_route=request.preferred_interaction_route,
         )
         project = self.store.get_project(project_id)
         self.runtime.emit(
             workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
             revision=project.revision, actor=actor, kind="spatial.directive.dispatched",
             trace_id=trace_id, payload={"receipt_id": receipt.id, "action": request.action, "directive": directive.model_dump(mode="json")},
+        )
+        self.runtime.emit(
+            workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+            revision=project.revision, actor=actor, kind="spatial.action.routed", trace_id=trace_id,
+            payload={
+                "receipt_id": receipt.id, "action": request.action,
+                "route": {
+                    "kind": request.preferred_interaction_route,
+                    "target_ids": request.target_ids, "expected_frame_id": request.expected_frame_id,
+                    "binding_id": request.binding_id,
+                },
+            },
         )
         return receipt, directive
 
@@ -604,13 +955,36 @@ class SpatialDirectiveService:
         timed_out = expires_at < datetime.now(timezone.utc)
         targets_match = sorted(ack.observed_target_ids) == sorted(receipt.payload.get("target_ids", []))
         hash_matches = ack.projection_hash == receipt.payload.get("projection_hash")
-        success = ack.success and targets_match and hash_matches and not timed_out
+        expected_frame_id = receipt.payload.get("expected_frame_id")
+        frame_matches = expected_frame_id is None or ack.before_frame_id == expected_frame_id
+        after_frame_valid = True
+        if expected_frame_id is not None:
+            after_frame_valid = bool(ack.after_frame_id)
+            if after_frame_valid and self.frames is not None:
+                try:
+                    after = self.frames.get(receipt.project_id, str(ack.after_frame_id))
+                    after_frame_valid = after.canonical_revision == receipt.project_revision
+                except KeyError:
+                    after_frame_valid = False
+        route_matches = (
+            ack.action_route is None
+            or ack.action_route.kind == receipt.payload.get("preferred_interaction_route", "semantic_handler")
+        )
+        success = (
+            ack.success and targets_match and hash_matches and frame_matches
+            and after_frame_valid and route_matches and not timed_out
+        )
         status = ReceiptStatus.TIMEOUT if timed_out else ReceiptStatus.OBSERVED_SUCCESS if success else ReceiptStatus.OBSERVED_FAILURE
         updated = self.store.update_receipt(receipt, status, {
             "consumer_id": ack.consumer_id, "observed_target_ids": ack.observed_target_ids,
             "active_depth": ack.active_depth, "renderer_mode": ack.renderer_mode,
             "findings": sanitize_payload(ack.findings), "targets_match": targets_match,
             "projection_hash_match": hash_matches,
+            "before_frame_id": ack.before_frame_id, "after_frame_id": ack.after_frame_id,
+            "frame_match": frame_matches, "after_frame_valid": after_frame_valid,
+            "changed_entity_ids": ack.changed_entity_ids, "changed_cells": ack.changed_cells,
+            "action_route": ack.action_route.model_dump(mode="json") if ack.action_route else None,
+            "route_match": route_matches,
         })
         project = self.store.get_project(receipt.project_id)
         kind = "spatial.directive.timeout" if timed_out else "spatial.directive.consumed" if success else "spatial.directive.failed"
@@ -619,4 +993,17 @@ class SpatialDirectiveService:
             revision=project.revision, actor=ack.consumer_id, kind=kind,
             trace_id=receipt.payload.get("trace_id"), payload={"receipt_id": receipt.id, "status": status.value},
         )
+        if ack.before_frame_id and ack.after_frame_id:
+            self.runtime.emit(
+                workspace_id=project.workspace_id or project.id, project_id=project.id, sequence_id=project.id,
+                revision=project.revision, actor=ack.consumer_id, kind="spatial.effect.observed",
+                trace_id=receipt.payload.get("trace_id"),
+                payload={"observation": {
+                    "directive_receipt_id": receipt.id, "before_frame_id": ack.before_frame_id,
+                    "after_frame_id": ack.after_frame_id, "changed_entity_ids": ack.changed_entity_ids,
+                    "changed_cells": ack.changed_cells,
+                    "route": ack.action_route.model_dump(mode="json") if ack.action_route else None,
+                    "success": success, "findings": sanitize_payload(ack.findings),
+                }},
+            )
         return updated

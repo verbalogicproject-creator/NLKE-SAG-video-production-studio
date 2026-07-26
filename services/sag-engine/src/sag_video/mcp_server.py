@@ -221,6 +221,7 @@ def append_journal_entry(
 def request_spatial_directive(
     action: str, expected_revision: int, expected_projection_hash: str,
     target_ids: list[str] | None = None, project_id: str = DEFAULT_PROJECT_ID,
+    expected_frame_id: str | None = None, binding_id: str | None = None,
 ) -> dict[str, Any]:
     """Request a registry-declared reversible view action and return an awaiting-consumer receipt."""
     with _client() as client:
@@ -230,7 +231,34 @@ def request_spatial_directive(
                 "action": action, "target_ids": target_ids or [],
                 "expected_revision": expected_revision,
                 "expected_projection_hash": expected_projection_hash,
+                "expected_frame_id": expected_frame_id, "binding_id": binding_id,
+                "preferred_interaction_route": "semantic_handler",
                 "intended_observed_effect": {"target_ids": target_ids or []},
+            },
+        ))
+
+
+@mcp.tool()
+def get_current_spatial_frame(project_id: str = DEFAULT_PROJECT_ID) -> dict[str, Any]:
+    """Read the latest bounded viewport declaration and semantic region bindings."""
+    with _client() as client:
+        return _json(client.get(f"/api/projects/{project_id}/spatial/frames/current"))
+
+
+@mcp.tool()
+def resolve_spatial_region(
+    frame_id: str, project_id: str = DEFAULT_PROJECT_ID,
+    entity_id: str | None = None, cell: str | None = None,
+    x: float | None = None, y: float | None = None, minimum_confidence: float = 0.5,
+) -> dict[str, Any]:
+    """Resolve exactly one stable entity, adaptive-grid cell, or normalized point in a declared frame."""
+    point = {"x": x, "y": y} if x is not None and y is not None else None
+    with _client() as client:
+        return _json(client.post(
+            f"/api/projects/{project_id}/spatial/frames/{frame_id}/resolve",
+            json={
+                "entity_id": entity_id, "cell": cell, "point": point,
+                "minimum_confidence": minimum_confidence,
             },
         ))
 

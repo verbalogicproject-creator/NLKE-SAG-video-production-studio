@@ -56,6 +56,11 @@ from .delivery import (
 )
 from .spatial import (
     PROJECTION_VERSION,
+    SPATIAL_FRAME_SCHEMA_VERSION,
+    SpatialFrameRequest,
+    SpatialFrameService,
+    SpatialObservationRequest,
+    SpatialRegionResolveRequest,
     SpatialDirectiveAck,
     SpatialDirectiveRequest,
     SpatialDirectiveService,
@@ -91,8 +96,12 @@ from .repo_to_video import (
     evidence_prompt,
     evidence_revision,
     parse_creative_brief,
+    prompt_studio_preview,
+    prompt_studio_schemas,
+    PromptStudioPreviewRequest,
     parse_storyboard,
     proposal_revision,
+    resolved_generation_prompt_revision,
     scene_generation_prompt,
     scene_negative_prompt,
     storyboard_response_schema,
@@ -184,9 +193,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store, create_runtime_broker(backend=settings.repository_backend, database_url=settings.database_url)
     )
     spatial = SpatialProjectionService(store)
+    spatial_frames = SpatialFrameService(store, spatial, runtime)
     semantic_graph = SemanticGraphAdapter(store, spatial)
     journal = SagJournalService(store, hash_key=os.getenv("SAG_JOURNAL_HMAC_KEY") or None)
-    directives = SpatialDirectiveService(store, spatial, runtime)
+    directives = SpatialDirectiveService(store, spatial, runtime, spatial_frames)
     connections = ProviderConnectionService(store)
     delivery = DeliveryService(store, runtime)
     capabilities = detect_capabilities()
@@ -269,6 +279,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.delivery = delivery
     application.state.generative = generative
     application.state.repo_evidence = repo_evidence
+    application.state.spatial_frames = spatial_frames
 
     def _require_workspace(request: Request, project_id: str) -> None:
         workspace_id = getattr(request.state, "workspace_id", None)
@@ -507,7 +518,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "journal_kinds": list(JOURNAL_KIND_DEFINITIONS),
             "delivery_schemas": delivery_schemas(),
             "generative_media": capabilities["generative_media"],
+            "prompt_studio_schema_version": "sag-prompt-studio/0.1",
+            "prompt_studio_schemas": prompt_studio_schemas(),
             "projection_version": PROJECTION_VERSION,
+            "spatial_frame_schema_version": SPATIAL_FRAME_SCHEMA_VERSION,
+            "spatial_computer_use": {
+                "frame_declarations": True,
+                "semantic_actuation": True,
+                "gemini_observer": os.getenv("SAG_GEMINI_OBSERVER_ENABLED", "").lower() in {"1", "true", "yes"},
+                "coordinate_fallback": os.getenv("SAG_COORDINATE_FALLBACK_ENABLED", "").lower() in {"1", "true", "yes"},
+                "raw_frame_retention": False,
+            },
             "spatial_actions": [
                 action for action in declared_actions() if action["name"].startswith("spatial.")
             ],
@@ -661,6 +682,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _emit_receipt_transition(receipt)
         return {"brief": brief.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json"), "next_step": "review_brief_then_generate_storyboard"}
 
+    @application.post("/api/projects/{project_id}/repo-to-video/prompts/preview")
+    def preview_repository_video_prompts(project_id: str, body: PromptStudioPreviewRequest, http_request: Request) -> dict:
+        """Compile the exact provider-facing prompt bundle without dispatching media generation."""
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        store.get_project(project_id)
+        return {
+            **prompt_studio_preview(body),
+            "model_registry_version": MODEL_REGISTRY_VERSION,
+            "model_registry_hash": model_registry_hash(),
+            "models": model_registry(),
+        }
+
     @application.post("/api/projects/{project_id}/repo-to-video/storyboard/commit")
     def commit_repository_storyboard(project_id: str, body: StoryboardCommitRequest, http_request: Request) -> dict:
         _require_workspace(http_request, project_id)
@@ -748,8 +782,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "creative brief and storyboard evidence revisions differ")
         storyboard_revision = proposal_revision(body.storyboard)
         brief_revision = proposal_revision(body.creative_brief)
+        prompt_revision = resolved_generation_prompt_revision(
+            body.storyboard, body.creative_brief, aspect_ratio=body.aspect_ratio,
+        )
         attempt_revision = hashlib.sha256(body.idempotency_key.encode()).hexdigest()[:10]
-        request_id = f"repo_video_{storyboard_revision[:18]}_{body.aspect_ratio.replace(':', '_')}_{attempt_revision}"
+        request_id = (
+            f"repo_video_{storyboard_revision[:12]}_{prompt_revision[:12]}_"
+            f"{body.aspect_ratio.replace(':', '_')}_{attempt_revision}"
+        )
         existing = store.receipt_for_request(project_id, request_id)
         if existing is not None:
             existing_operations = [
@@ -771,6 +811,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evidence_revision": body.storyboard.evidence_revision,
                 "storyboard_revision": storyboard_revision,
                 "creative_brief_revision": brief_revision,
+                "resolved_prompt_revision": prompt_revision,
                 "idempotency_key_hash": attempt_revision,
                 "aspect_ratio": body.aspect_ratio,
                 "dispatch_state": "running",
@@ -1376,6 +1417,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             project_id, previous_revision=previous_revision, previous_cursor=previous_cursor,
             previous_projection_hash=previous_projection_hash,
         ).model_dump(mode="json")
+
+    @application.post("/api/projects/{project_id}/spatial/frames", status_code=201)
+    def declare_spatial_frame(
+        project_id: str, body: SpatialFrameRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "focus:write")
+        try:
+            frame = spatial_frames.declare(
+                project_id, body, actor=getattr(http_request.state, "actor", "studio-browser"),
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        return frame.model_dump(mode="json")
+
+    @application.get("/api/projects/{project_id}/spatial/frames/current")
+    def get_current_spatial_frame(project_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            return spatial_frames.current(project_id).model_dump(mode="json")
+        except KeyError as error:
+            raise HTTPException(404, "spatial frame not found") from error
+
+    @application.get("/api/projects/{project_id}/spatial/frames/{frame_id}")
+    def get_spatial_frame(project_id: str, frame_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            return spatial_frames.get(project_id, frame_id).model_dump(mode="json")
+        except KeyError as error:
+            raise HTTPException(404, "spatial frame not found") from error
+
+    @application.post("/api/projects/{project_id}/spatial/frames/{frame_id}/resolve")
+    def resolve_spatial_frame_region(
+        project_id: str, frame_id: str, body: SpatialRegionResolveRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            return spatial_frames.resolve(project_id, frame_id, body)
+        except KeyError as error:
+            raise HTTPException(404, "spatial frame not found") from error
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @application.post("/api/projects/{project_id}/spatial/observations", status_code=201)
+    def record_spatial_observation(
+        project_id: str, body: SpatialObservationRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "focus:write")
+        try:
+            return spatial_frames.observe(
+                project_id, body, actor=getattr(http_request.state, "actor", "studio-browser"),
+            )
+        except KeyError as error:
+            raise HTTPException(404, "spatial frame not found") from error
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
 
     @application.get("/api/projects/{project_id}/runtime/events")
     def get_runtime_events(

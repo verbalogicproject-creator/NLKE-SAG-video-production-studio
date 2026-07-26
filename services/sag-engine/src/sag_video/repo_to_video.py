@@ -13,7 +13,7 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 SECRET_PATTERNS = (
@@ -62,6 +62,29 @@ class RepoVideoGenerationRequest(BaseModel):
     confirmation_id: str = Field(min_length=8, max_length=120)
     aspect_ratio: Literal["9:16", "16:9"] = "9:16"
     idempotency_key: str = Field(default="initial", min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+
+
+class PromptStudioPreviewRequest(BaseModel):
+    creative_instruction: str = Field(default="", max_length=4000)
+    creative_brief: "CreativeBrief | None" = None
+    storyboard: "RepoStoryboard | None" = None
+    aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    active_scene_id: str | None = Field(default=None, max_length=160)
+
+
+class PromptModulePreview(BaseModel):
+    id: str
+    label: str
+    stage: Literal["direction", "planning", "generation", "finishing"]
+    component: str
+    model: str | None = None
+    content: str
+    content_sha256: str
+    estimated_tokens: int
+    dispatch: Literal["planning_context", "provider_input", "derived_provider_input", "not_connected"]
+    editable_field: str | None = None
+    consumers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CreativeBrief(BaseModel):
@@ -128,6 +151,33 @@ class RepositoryEvidence(BaseModel):
     languages: dict[str, int] = Field(default_factory=dict)
 
 
+class StoryboardRegion(BaseModel):
+    id: str = Field(pattern=r"^region_[a-z0-9_-]+$")
+    purpose: Literal["authentic_reference", "readable_text", "safe_motion", "caption_safe", "cta", "protected"]
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+    behavior: Literal["preserve", "animate", "avoid", "replace"] = "preserve"
+    source_asset_id: str | None = Field(default=None, max_length=160)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def remains_inside_frame(self):
+        if self.x + self.width > 1.000001 or self.y + self.height > 1.000001:
+            raise ValueError("storyboard region exceeds normalized frame bounds")
+        if self.purpose == "authentic_reference" and not self.source_asset_id:
+            raise ValueError("authentic reference regions require a source asset id")
+        return self
+
+
+class SceneSpatialLayout(BaseModel):
+    coordinate_space: Literal["normalized_0_1"] = "normalized_0_1"
+    columns: int = Field(default=5, ge=4, le=16)
+    rows: int = Field(default=10, ge=6, le=24)
+    regions: list[StoryboardRegion] = Field(default_factory=list, max_length=24)
+
+
 class StoryboardScene(BaseModel):
     id: str = Field(pattern=r"^scene_[a-z0-9_-]+$")
     start_seconds: float = Field(ge=0)
@@ -139,6 +189,7 @@ class StoryboardScene(BaseModel):
     generation_model: Literal[
         "gemini-omni-flash-preview", "veo-3.1-generate-preview", "veo-3.1-lite-generate-preview",
     ] = "gemini-omni-flash-preview"
+    spatial_layout: SceneSpatialLayout | None = None
 
 
 class RepoStoryboard(BaseModel):
@@ -241,6 +292,8 @@ def evidence_prompt(request: RepoVideoRequest, evidence: RepositoryEvidence) -> 
         "- Scenes must be sequential, non-overlapping, and fit inside the requested duration.\n"
         "- Use 8 to 10 scenes of 4 to 8 seconds each. Give each scene one clear beat and calculate cumulative start times exactly.\n"
         "- Every scene id must start with scene_ and contain only lowercase letters, numbers, underscores, or hyphens.\n"
+        "- When a scene uses an authentic screenshot or requires deterministic text, add a normalized spatial_layout. "
+        "Mark authentic_reference and readable_text regions as preserve, generated motion as safe_motion, and protected regions as avoid.\n"
         "- Use gemini-omni-flash-preview by default. Select Veo only for explicit frame control, "
         "extension, or a shot whose cinematic control justifies it; use Veo Lite for intentional previews.\n\n"
         f"{_repository_context(request, evidence)}\n\n"
@@ -275,6 +328,17 @@ def scene_generation_prompt(
         "Audio: Native ambience and motivated sound effects only. Narration, music, and captions are added separately in finishing.",
         f"Evidence boundary: Visualize only claims supported by {', '.join(scene.evidence_refs)}.",
     ]
+    if scene.spatial_layout and scene.spatial_layout.regions:
+        lines.append(
+            f"Spatial contract: normalized frame on a {scene.spatial_layout.columns} by "
+            f"{scene.spatial_layout.rows} address grid. Obey every region below."
+        )
+        for region in scene.spatial_layout.regions:
+            source = f", source asset {region.source_asset_id}" if region.source_asset_id else ""
+            lines.append(
+                f"- {region.id}: {region.purpose}, {region.behavior}, bounds "
+                f"x={region.x:g}, y={region.y:g}, width={region.width:g}, height={region.height:g}{source}."
+            )
     if scene.generation_model == "gemini-omni-flash-preview":
         lines.extend([
             "Structure: A single continuous, unbroken scene with no scene cuts unless the visual direction explicitly requests a montage.",
@@ -290,6 +354,143 @@ def scene_negative_prompt(*, aspect_ratio: Literal["9:16", "16:9"]) -> str:
         "dialogue, voiceover, subtitles, captions, watermarks, fake logos, invented product features, "
         f"unreadable interface text, distorted typography, duplicate UI elements, {framing}"
     )
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def _prompt_module(
+    *, identity: str, label: str, stage: Literal["direction", "planning", "generation", "finishing"],
+    component: str, content: str, dispatch: Literal[
+        "planning_context", "provider_input", "derived_provider_input", "not_connected"
+    ], model: str | None = None, editable_field: str | None = None,
+    consumers: list[str] | None = None, warnings: list[str] | None = None,
+) -> PromptModulePreview:
+    return PromptModulePreview(
+        id=identity, label=label, stage=stage, component=component, model=model, content=content,
+        content_sha256=_content_hash(content), estimated_tokens=max(0, (len(content) + 3) // 4),
+        dispatch=dispatch, editable_field=editable_field, consumers=consumers or [], warnings=warnings or [],
+    )
+
+
+def resolved_generation_prompt_revision(
+    storyboard: RepoStoryboard, brief: CreativeBrief, *, aspect_ratio: Literal["9:16", "16:9"],
+) -> str:
+    """Hash the exact provider-bound prompt bundle used by one generation attempt."""
+    bundle = {
+        "aspect_ratio": aspect_ratio,
+        "scenes": [
+            {
+                "scene_id": scene.id,
+                "model": scene.generation_model,
+                "prompt": scene_generation_prompt(scene, brief, aspect_ratio=aspect_ratio),
+                "negative_prompt": "" if scene.generation_model == "gemini-omni-flash-preview" else scene_negative_prompt(aspect_ratio=aspect_ratio),
+            }
+            for scene in storyboard.scenes
+        ],
+        "music": brief.music_prompt,
+        "narration": " ".join(scene.narration for scene in storyboard.scenes),
+    }
+    encoded = json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def prompt_studio_preview(request: PromptStudioPreviewRequest) -> dict[str, Any]:
+    """Resolve editable prompt modules without dispatching or persisting prompt text."""
+    modules: list[PromptModulePreview] = []
+    if request.creative_instruction:
+        modules.append(_prompt_module(
+            identity="direction.instruction", label="Creative direction", stage="direction",
+            component="Director", model="gemini-omni-flash-preview", content=request.creative_instruction,
+            dispatch="planning_context", editable_field="creative_instruction",
+            consumers=["creative brief planner", "storyboard planner"],
+        ))
+    brief = request.creative_brief
+    storyboard = request.storyboard
+    if brief is not None:
+        modules.extend([
+            _prompt_module(
+                identity="generation.omni_continuity", label="Omni continuity", stage="generation",
+                component="Scene video", model="gemini-omni-flash-preview", content=brief.omni_prompt,
+                dispatch="provider_input", editable_field="omni_prompt",
+                consumers=["Omni scenes", "resolved scene prompts"],
+            ),
+            _prompt_module(
+                identity="generation.veo_continuity", label="Veo continuity", stage="generation",
+                component="Controlled scene video", model="veo-3.1-generate-preview", content=brief.veo_prompt,
+                dispatch="provider_input", editable_field="veo_prompt",
+                consumers=["Veo scenes", "Veo Lite previews", "resolved scene prompts"],
+            ),
+            _prompt_module(
+                identity="generation.music", label="Music direction", stage="generation",
+                component="Music", model="lyria-3-clip-preview", content=brief.music_prompt,
+                dispatch="provider_input", editable_field="music_prompt", consumers=["Lyria soundtrack"],
+            ),
+            _prompt_module(
+                identity="planning.narration_guidance", label="Narration guidance", stage="planning",
+                component="Narration planning", model="gemini-3.1-flash-tts-preview",
+                content=brief.narration_guidance, dispatch="planning_context",
+                editable_field="narration_guidance",
+                consumers=["narration review", "future voice controls"],
+                warnings=["Current TTS dispatch uses the reviewed scene narration as its direct input."],
+            ),
+        ])
+    if brief is not None and storyboard is not None:
+        selected = next(
+            (scene for scene in storyboard.scenes if scene.id == request.active_scene_id),
+            storyboard.scenes[0] if storyboard.scenes else None,
+        )
+        if selected is not None:
+            resolved = scene_generation_prompt(selected, brief, aspect_ratio=request.aspect_ratio)
+            modules.append(_prompt_module(
+                identity="generation.resolved_scene", label=f"Resolved {selected.id}", stage="generation",
+                component="Provider scene request", model=selected.generation_model, content=resolved,
+                dispatch="derived_provider_input", consumers=[selected.id, "provider video operation"],
+            ))
+            if selected.generation_model != "gemini-omni-flash-preview":
+                modules.append(_prompt_module(
+                    identity="generation.veo_negative", label="Veo exclusions", stage="generation",
+                    component="Provider scene request", model=selected.generation_model,
+                    content=scene_negative_prompt(aspect_ratio=request.aspect_ratio),
+                    dispatch="derived_provider_input", consumers=[selected.id, "provider video operation"],
+                ))
+        narration = " ".join(scene.narration for scene in storyboard.scenes)
+        modules.append(_prompt_module(
+            identity="generation.narration_script", label="Resolved narration script", stage="generation",
+            component="Narration", model="gemini-3.1-flash-tts-preview", content=narration,
+            dispatch="derived_provider_input", consumers=["Gemini TTS", *[scene.id for scene in storyboard.scenes]],
+        ))
+        revision = resolved_generation_prompt_revision(storyboard, brief, aspect_ratio=request.aspect_ratio)
+    else:
+        revision_body = [module.model_dump(mode="json") for module in modules]
+        revision = hashlib.sha256(json.dumps(revision_body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    warnings: list[str] = []
+    if brief is None:
+        warnings.append("Generate a creative brief to unlock provider prompt modules.")
+    if storyboard is None:
+        warnings.append("Generate a storyboard to preview resolved scene and narration inputs.")
+    if brief is not None and storyboard is not None and brief.evidence_revision != storyboard.evidence_revision:
+        warnings.append("Creative brief and storyboard evidence revisions do not match.")
+    if brief is not None:
+        warnings.extend(brief.unsupported_claim_warnings)
+    return {
+        "schema_version": "sag-prompt-studio/0.1",
+        "resolved_prompt_revision": revision,
+        "modules": [module.model_dump(mode="json") for module in modules],
+        "warnings": warnings,
+        "dispatch_allowed": (
+            brief is not None and storyboard is not None
+            and brief.evidence_revision == storyboard.evidence_revision
+        ),
+    }
+
+
+def prompt_studio_schemas() -> dict[str, Any]:
+    return {
+        "PromptStudioPreviewRequest": PromptStudioPreviewRequest.model_json_schema(),
+        "PromptModulePreview": PromptModulePreview.model_json_schema(),
+    }
 
 
 def storyboard_response_schema(evidence: RepositoryEvidence) -> dict[str, Any]:

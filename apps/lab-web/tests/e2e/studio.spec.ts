@@ -69,6 +69,73 @@ test('pause control and responsive targets remain operable', async ({ page }) =>
   await assertNoHorizontalDrift(page);
 });
 
+test('declares an adaptive semantic frame and exposes an accessible spatial map', async ({ page }) => {
+  const declaration = page.waitForRequest((request) => (
+    request.method() === 'POST' && request.url().endsWith('/studio/spatial/frames')
+  ));
+  await page.goto(studioPath());
+  const request = await declaration;
+  const frame = request.postDataJSON();
+  expect(frame.schema_version).toBe('sag-spatial-frame/1.0');
+  expect(frame.redaction_state).toBe('metadata_only');
+  expect(frame.raw_screenshot).toBeUndefined();
+  expect(frame.grid.columns).toBeGreaterThanOrEqual(4);
+  expect(frame.grid.rows).toBeGreaterThanOrEqual(6);
+  expect(frame.grid.cell_width_css_px).toBeGreaterThanOrEqual(44);
+  expect(frame.grid.cell_height_css_px).toBeGreaterThanOrEqual(44);
+  expect(frame.bindings).toEqual(expect.arrayContaining([
+    expect.objectContaining({ entity_id: 'viewport:studio', source: 'dom', confidence: 1 }),
+    expect.objectContaining({ entity_id: 'viewport:studio-header', source: 'dom', confidence: 1 }),
+  ]));
+
+  const toggle = page.getByRole('button', { name: 'Show spatial map' });
+  await expect(toggle).toBeVisible();
+  const toggleBox = await toggle.boundingBox();
+  if ((page.viewportSize()?.width ?? 1000) < 768) expect(toggleBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+  await toggle.click();
+  await expect(page.getByLabel('Declared spatial regions')).toBeVisible();
+  await expect(page.getByLabel('Declared spatial regions')).toContainText('bindings');
+  await expect(page.locator('.studio-coordinate-grid')).toBeVisible();
+  await assertNoHorizontalDrift(page);
+});
+
+test('mobile Studio controls, semantic rows, and Director fields stay contained', async ({ page }) => {
+  test.skip((page.viewportSize()?.width ?? 1000) >= 768, 'Mobile containment applies below 768px');
+  await page.goto(studioPath());
+
+  const header = page.locator('.studio-header');
+  await expect(header).toBeVisible();
+  expect(await header.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  for (const name of ['Undo', 'Pair Codex', 'Director', 'Render', 'Open governance']) {
+    const button = page.getByRole('button', { name, exact: true });
+    const box = await button.boundingBox();
+    expect(box, `${name} should be visible`).not.toBeNull();
+    expect((box?.x ?? -1) + (box?.width ?? 0)).toBeLessThanOrEqual((page.viewportSize()?.width ?? 0) + 1);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  }
+
+  await page.getByRole('button', { name: 'Context' }).click();
+  const controls = page.locator('.studio-spatial-controls');
+  expect(await controls.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  const row = page.locator('.studio-hierarchy-tree.compact [role="treeitem"]').first();
+  await expect(row).toBeVisible();
+  expect(await row.evaluate((element) => {
+    const label = element.children.item(1)?.getBoundingClientRect();
+    const layer = element.children.item(2)?.getBoundingClientRect();
+    return Boolean(label && layer && (label.right <= layer.left || label.bottom <= layer.top));
+  })).toBe(true);
+
+  await page.getByRole('button', { name: 'Director', exact: true }).click();
+  const director = page.getByLabel('Director workspace');
+  const directorBox = await director.boundingBox();
+  expect(directorBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect(directorBox?.width ?? 0).toBeLessThanOrEqual(page.viewportSize()?.width ?? 0);
+  const refBox = await director.getByLabel('Git ref').boundingBox();
+  const durationBox = await director.getByLabel('Duration').boundingBox();
+  expect(Math.abs((refBox?.y ?? 0) - (durationBox?.y ?? 1))).toBeLessThanOrEqual(1);
+  await assertNoHorizontalDrift(page);
+});
+
 test('falls back to the semantic hierarchy after WebGL context loss', async ({ page }) => {
   await page.goto(studioPath());
   await page.getByRole('button', { name: 'Context' }).click();
@@ -123,7 +190,10 @@ test('deduplicates directives and acknowledges the exact observed target', async
   await expect.poll(() => acknowledgements.length).toBe(1);
   expect(acknowledgements[0]).toMatchObject({
     operation: 'ack', receiptId: 'receipt-e2e-1',
-    acknowledgement: { observed_target_ids: [directiveTarget!], success: true },
+    acknowledgement: {
+      observed_target_ids: [directiveTarget!], success: true,
+      action_route: { kind: 'semantic_handler', action: 'spatial.focus_entity', target_id: directiveTarget! },
+    },
   });
   expect(target).toBeTruthy();
 });
@@ -158,5 +228,45 @@ test('Director tabs and controls are keyboard accessible', async ({ page }) => {
   const box = await inspect.boundingBox();
   if ((page.viewportSize()?.width ?? 1000) < 768) expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
   else expect(box?.height ?? 0).toBeGreaterThanOrEqual(34);
+  await assertNoHorizontalDrift(page);
+});
+
+test('Prompting Studio edits a bound module and exposes routing on mobile', async ({ page }) => {
+  await page.route('**/repo-to-video/prompts/preview', async (route) => {
+    const body = route.request().postDataJSON() as { creative_instruction?: string };
+    const content = body.creative_instruction ?? '';
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      schema_version: 'sag-prompt-studio/0.1', resolved_prompt_revision: 'a'.repeat(64),
+      dispatch_allowed: false, warnings: ['Generate a creative brief to unlock provider prompt modules.'],
+      model_registry_version: 'test', model_registry_hash: 'b'.repeat(64),
+      models: [{
+        id: 'gemini-omni-flash-preview', provider: 'google', family: 'video', lifecycle: 'preview',
+        capabilities: ['multimodal_reasoning'], input_modalities: ['text'], output_modalities: ['video'],
+        default_for: [], notes: 'Planning and video generation.',
+      }],
+      modules: [{
+        id: 'direction.instruction', label: 'Creative direction', stage: 'direction', component: 'Director',
+        model: 'gemini-omni-flash-preview', content, content_sha256: 'c'.repeat(64),
+        estimated_tokens: Math.ceil(content.length / 4), dispatch: 'planning_context',
+        editable_field: 'creative_instruction', consumers: ['creative brief planner', 'storyboard planner'], warnings: [],
+      }],
+    }) });
+  });
+  await page.goto(studioPath());
+  await page.getByRole('button', { name: 'Director' }).click();
+  const director = page.getByLabel('Director workspace');
+  await director.getByRole('tab', { name: 'Prompts' }).click();
+  await expect(director.getByText('Prompting Studio', { exact: true })).toBeVisible();
+  await expect(director.getByLabel('Prompt routing topology')).toContainText('Omni / Veo');
+  const editor = director.getByLabel('Editable source');
+  await editor.fill('Create an evidence-bound product tutorial with authentic Studio captures.');
+  await expect(editor).toHaveValue(/evidence-bound product tutorial/);
+  const save = director.getByRole('button', { name: 'Save draft' });
+  await save.click();
+  await expect(director.getByText(/Matches saved draft|Changed from saved draft/)).toBeVisible();
+  if ((page.viewportSize()?.width ?? 1000) < 768) {
+    expect((await save.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    expect(await director.locator('.prompt-workbench').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  }
   await assertNoHorizontalDrift(page);
 });

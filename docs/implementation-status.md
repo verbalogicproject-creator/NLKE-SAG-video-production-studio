@@ -1,10 +1,55 @@
 # Implementation status
 
-Updated: July 24, 2026
+Updated: July 26, 2026
+
+Implementation is currently frozen at Dogfood Pause 0: connected production
+control surface. The approved pause criteria, exit evidence, and ordered future
+gates are recorded in
+[`workflows/dogfood-pause-gates.md`](workflows/dogfood-pause-gates.md). The next
+feature slice is the approved production packet, but it must not begin until the
+current phone/manual dogfood outcome is recorded.
 
 ## Unified Studio and SAG Spatial Runtime
 
 The foundational spatial runtime slice is implemented and verified locally:
+
+- The additive `sag-spatial-frame/1.0` perceptual binding plane is implemented.
+  Studio self-declares revision-bound, metadata-only viewport frames using an
+  adaptive minimum-44-pixel grid, normalized geometry, stable semantic IDs,
+  eligible actions, source, confidence, and redaction state. Current-frame,
+  frame-readback, region-resolution, and effect-observation endpoints are
+  exposed through FastAPI, same-origin Next routes, and read-only MCP tools.
+- Frame-bound directives now preserve before/after frame IDs, binding identity,
+  the semantic action route, changed entities, changed grid cells, and verified
+  effect status. Unknown entities, stale projections, mismatched bindings,
+  unsafe coordinate routes, raw screenshot fields, unredacted Gemini bindings,
+  and oversized declarations fail closed. Gemini observation and coordinate
+  fallback remain disabled by default.
+- Storyboard scenes can carry optional spatial layout contracts for authentic
+  repository references, readable text, safe motion, captions, CTA, and
+  protected regions. The Director exposes an editable region surface and the
+  validated contract is included in generation prompts without breaking older
+  storyboards.
+- Studio exposes an optional accessible spatial map and functional coordinate
+  overlay. Edit, Context, and System retain one controller; the map is derived
+  from visible semantic elements and does not retain pixels or create a second
+  project model. Mobile controls retain 44-pixel targets and the overlay respects
+  reduced-motion behavior inherited from Studio.
+- Director now includes an integrated Prompting Studio tab. It exposes editable
+  creative direction, Omni continuity, Veo continuity, Lyria music, and
+  narration-guidance modules; exact read-only resolved scene, Veo-negative, and
+  Gemini TTS inputs; model capabilities; consumer mapping; heuristic token
+  estimates; draft history; warnings; and the resolved generation hash. Prompt
+  preview does not dispatch media or emit prompt text to runtime telemetry.
+- Generation idempotency now includes the exact resolved prompt-bundle revision,
+  closing the prior case where a changed brief prompt with the same storyboard
+  and attempt key could retrieve an older generation receipt.
+- The production surfaces now share more of the same visual grammar: Prompting
+  Studio shows the real branching video/music/narration topology, Queue shows
+  truthful per-branch insertion counts, Media tiles expose actual observation
+  state and bounded hashes, and Governance includes a receipt-backed
+  verification console. These are projections of canonical data rather than
+  simulated waveforms, fake progress, or generated interface labels.
 
 - `npm run sag-server` starts only the authoritative FastAPI semantic engine on
   port 8080. Next.js remains a separate consumer.

@@ -7,10 +7,11 @@ import {
   Activity, Bot, Box, Camera, Captions, ChevronDown, CirclePlay, EyeOff, Film, Image as ImageIcon,
   Layers3, Link2, LoaderCircle, Mic2, MonitorPlay, MoreHorizontal, Pause, Play, Plus,
   Redo2, Scissors, Search, Settings2, SlidersHorizontal, Split, Square, Trash2,
-  Undo2, Upload, Volume2, WandSparkles, Wifi, WifiOff, X,
+  ShieldCheck, Undo2, Upload, Volume2, WandSparkles, Wifi, WifiOff, X,
 } from 'lucide-react';
 import { CaptureSpool, CompletedCapture, createCaptureSpool, recoverCaptureSpools } from './capture-spool';
 import { DirectorPanel } from './DirectorPanel';
+import { SpatialAwarenessOverlay, useSpatialAwareness } from './SpatialAwareness';
 
 const SpatialCanvas = dynamic(() => import('./SpatialCanvas'), { ssr: false });
 
@@ -20,7 +21,8 @@ const MAX_DURATION = 180 * TICKS;
 type Asset = {
   id: string; name: string; kind: string; intake_status: string; duration_ticks?: number | null;
   proxy_asset_id?: string | null; thumbnail_asset_id?: string | null; managed_uri?: string | null;
-  parent_asset_id?: string | null;
+  parent_asset_id?: string | null; sha256?: string | null; source_kind?: string;
+  observation_summary?: Record<string, unknown>;
 };
 type Item = {
   id: string; kind: string; track_id: string; name: string; start_ticks: number; duration_ticks: number;
@@ -98,6 +100,12 @@ export function Studio({
   const seenRuntimeEvents = useRef(new Set<string>());
   const [playing, setPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const awareness = useSpatialAwareness({
+    projectId: controlProject.id,
+    revision: project.revision,
+    depth,
+    triggerKey: `${selectedId ?? ''}:${mobilePane}:${directorOpen}:${activityOpen}:${show3d}`,
+  });
 
   const items = useMemo(() => project.tracks.flatMap((track) => track.items), [project]);
   const selected = items.find((item) => item.id === selectedId) ?? null;
@@ -157,7 +165,18 @@ export function Studio({
     source.onopen = () => setRuntimeConnection('connected');
     source.onerror = () => setRuntimeConnection('disconnected');
 
-    async function acknowledge(directive: any, success: boolean, findings: Array<Record<string, unknown>> = []) {
+    function rememberRuntimeCursor(message: MessageEvent<string>) {
+      try {
+        const event = JSON.parse(message.data);
+        if (event?.cursor) window.sessionStorage.setItem(`sag-runtime-cursor:${controlProject.id}`, String(event.cursor));
+      } catch { /* Ignore malformed runtime telemetry. */ }
+    }
+
+    async function acknowledge(
+      directive: any, success: boolean, findings: Array<Record<string, unknown>> = [],
+      beforeFrame: any = null, afterFrame: any = null,
+    ) {
+      const binding = beforeFrame?.bindings?.find((entry: any) => entry.binding_id === directive.binding_id);
       await fetch(`/api/projects/${controlProject.id}/studio/spatial`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -167,6 +186,15 @@ export function Studio({
             projection_hash: directive.expected_projection_hash,
             observed_target_ids: success ? directive.target_ids : [],
             active_depth: depth, renderer_mode: show3d ? 'webgl' : 'dom_tree', findings, success,
+            before_frame_id: directive.expected_frame_id ?? beforeFrame?.frame_id,
+            after_frame_id: afterFrame?.frame_id,
+            changed_entity_ids: success ? directive.target_ids : [],
+            changed_cells: binding?.cells ?? [],
+            action_route: {
+              kind: 'semantic_handler', action: directive.action,
+              target_id: directive.target_ids?.[0] ?? null,
+              binding_id: directive.binding_id ?? null, confidence: binding?.confidence ?? 1,
+            },
           },
         }),
       });
@@ -185,26 +213,46 @@ export function Studio({
         void acknowledge(directive, false, [{ code: 'agent_spatial_paused', summary: 'Browser spatial directives are paused.' }]);
         return;
       }
-      const targetId = directive.target_ids?.[0] ?? null;
-      if (targetId) setSelectedId(targetId);
-      if (directive.action === 'spatial.set_depth') {
-        const requested = directive.intended_observed_effect?.active_depth;
-        changeDepth(requested === 'edit' || requested === 'system' ? requested : 'context');
-      } else if (directive.action === 'spatial.reset_view') {
-        setShow3d(window.matchMedia('(min-width: 768px) and (orientation: landscape)').matches);
-      } else if (directive.action !== 'spatial.focus_entity' && directive.action !== 'spatial.frame_entity') {
-        changeDepth(directive.action === 'spatial.reveal_blast_radius' ? 'system' : 'context');
-      }
-      void fetchSpatial(depth, targetId).then(() => acknowledge(directive, true)).catch((cause) => {
+      void (async () => {
+        let beforeFrame = awareness.latestFrameRef.current;
+        if (directive.expected_frame_id && beforeFrame?.frame_id !== directive.expected_frame_id) {
+          const response = await fetch(
+            `/api/projects/${controlProject.id}/studio/spatial/frames/${encodeURIComponent(directive.expected_frame_id)}`,
+            { cache: 'no-store' },
+          );
+          if (!response.ok) throw new Error('Expected spatial frame is unavailable');
+          beforeFrame = await response.json();
+        }
+        const targetId = directive.target_ids?.[0] ?? null;
+        if (targetId) setSelectedId(targetId);
+        let nextDepth = depth;
+        if (directive.action === 'spatial.set_depth') {
+          const requested = directive.intended_observed_effect?.active_depth;
+          nextDepth = requested === 'edit' || requested === 'system' ? requested : 'context';
+          changeDepth(nextDepth);
+        } else if (directive.action === 'spatial.reset_view') {
+          setShow3d(window.matchMedia('(min-width: 768px) and (orientation: landscape)').matches);
+        } else if (directive.action !== 'spatial.focus_entity' && directive.action !== 'spatial.frame_entity') {
+          nextDepth = directive.action === 'spatial.reveal_blast_radius' ? 'system' : 'context';
+          changeDepth(nextDepth);
+        }
+        await fetchSpatial(nextDepth, targetId);
+        await new Promise((resolve) => window.setTimeout(resolve, 80));
+        const afterFrame = await awareness.declareFrameNow();
+        await acknowledge(directive, true, [], beforeFrame, afterFrame);
+      })().catch((cause) => {
         void acknowledge(directive, false, [{ code: 'projection_failed', summary: cause instanceof Error ? cause.message : 'Projection failed.' }]);
       });
     }
 
     source.addEventListener('spatial.directive.dispatched', onDirective as EventListener);
+    source.addEventListener('spatial.frame.declared', rememberRuntimeCursor as EventListener);
+    source.addEventListener('spatial.action.routed', rememberRuntimeCursor as EventListener);
+    source.addEventListener('spatial.effect.observed', rememberRuntimeCursor as EventListener);
     source.addEventListener('snapshot_required', () => { void fetchSpatial(depth).catch(() => undefined); });
     source.addEventListener('receipt.transitioned', () => { void refresh(true).catch(() => undefined); });
     return () => source.close();
-  }, [controlProject.id, depth, show3d, spatialPaused]);
+  }, [controlProject.id, depth, show3d, spatialPaused, awareness.declareFrameNow]);
 
   async function operate(operation: string, payload: Record<string, unknown> = {}) {
     setBusy(operation); setError('');
@@ -269,30 +317,33 @@ export function Studio({
     ? `/api/projects/${controlProject.id}/studio/assets/${selectedAsset.id}/${selectedAsset.proxy_asset_id ? 'proxy' : 'content'}`
     : null;
 
-  return <div className="studio-root">
-    <header className="studio-header">
-      <div className="flex min-w-0 items-center gap-3">
+  return <div className="studio-root" ref={awareness.rootRef} data-sag-entity-id="viewport:studio" data-sag-action-ids="spatial.reset_view">
+    <header className="studio-header" data-sag-entity-id="viewport:studio-header" data-sag-action-ids="spatial.set_depth">
+      <div className="studio-project-identity">
         <Link href="/dashboard" className="studio-mark" aria-label="Back to projects"><Film size={19} /></Link>
         <div className="min-w-0">
           <div className="truncate text-[13px] font-medium text-ink-0">{controlProject.name}</div>
           <div className="font-mono text-[10px] text-ink-2">REV {project.revision} / {project.canvas.width}×{project.canvas.height}</div>
         </div>
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="studio-header-actions">
         <div className="studio-depth-switch" role="group" aria-label="Studio depth">
           {(['edit', 'context', 'system'] as const).map((value) => <button
             key={value} className={depth === value ? 'active' : ''} aria-pressed={depth === value}
+            data-sag-entity-id={`viewport:studio-depth-${value}`} data-sag-action-ids="spatial.set_depth"
             onClick={() => changeDepth(value)}>{value.charAt(0).toUpperCase() + value.slice(1)}</button>)}
         </div>
-        <button className="studio-button secondary" onClick={() => void command('project.undo', {})} disabled={busy !== '' || !eligible.has('project.undo')}><Undo2 size={15} /><span className="hidden sm:inline">Undo</span></button>
-        <button className="studio-button secondary hidden md:flex" onClick={() => void command('project.redo', {})} disabled={busy !== '' || !eligible.has('project.redo')}><Redo2 size={15} />Redo</button>
-        <button className="studio-button secondary" onClick={() => void pair()} disabled={busy !== ''}><Link2 size={15} /><span className="hidden sm:inline">Pair Codex</span></button>
-        <button className="studio-button director-trigger" aria-pressed={directorOpen} onClick={() => {
-          setActivityOpen(false);
-          setDirectorOpen((value) => { window.localStorage.setItem(`sag-director-open:${controlProject.id}`, value ? '0' : '1'); return !value; });
-        }}><WandSparkles size={15} /><span className="hidden sm:inline">Director</span></button>
-        <button className="studio-button primary" onClick={() => void operate('render')} disabled={busy !== ''}><CirclePlay size={15} />Render</button>
-        <button className="studio-icon-button" onClick={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); setActivityOpen((value) => !value); }} aria-label="Open governance"><Activity size={17} /></button>
+        <div className="studio-command-strip">
+          <button className="studio-button secondary" onClick={() => void command('project.undo', {})} disabled={busy !== '' || !eligible.has('project.undo')} aria-label="Undo"><Undo2 size={15} /><span className="hidden sm:inline">Undo</span></button>
+          <button className="studio-button secondary hidden md:flex" onClick={() => void command('project.redo', {})} disabled={busy !== '' || !eligible.has('project.redo')}><Redo2 size={15} />Redo</button>
+          <button className="studio-button secondary" onClick={() => void pair()} disabled={busy !== ''} aria-label="Pair Codex"><Link2 size={15} /><span className="hidden sm:inline">Pair Codex</span></button>
+          <button className="studio-button director-trigger" aria-pressed={directorOpen} aria-label="Director" onClick={() => {
+            setActivityOpen(false);
+            setDirectorOpen((value) => { window.localStorage.setItem(`sag-director-open:${controlProject.id}`, value ? '0' : '1'); return !value; });
+          }}><WandSparkles size={15} /><span className="hidden sm:inline">Director</span></button>
+          <button className="studio-button primary" onClick={() => void operate('render')} disabled={busy !== ''}><CirclePlay size={15} />Render</button>
+          <button className="studio-icon-button" onClick={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); setActivityOpen((value) => !value); }} aria-label="Open governance"><Activity size={17} /></button>
+        </div>
       </div>
     </header>
 
@@ -303,7 +354,7 @@ export function Studio({
     {error ? <div className="studio-error" role="alert"><span>{error}</span><button onClick={() => setError('')}><X size={15} /></button></div> : null}
 
     {depth === 'edit' ? <main className="studio-workspace">
-      <section className={`studio-panel studio-media ${mobilePane === 'media' ? 'mobile-active' : ''}`} aria-label="Media">
+      <section className={`studio-panel studio-media ${mobilePane === 'media' ? 'mobile-active' : ''}`} aria-label="Media" data-sag-entity-id="viewport:media" data-sag-action-ids="spatial.frame_entity">
         <PanelHeading icon={<Layers3 size={15} />} title="Media" action={<button className="studio-icon-button compact" aria-label="Search media"><Search size={14} /></button>} />
         <div className="studio-panel-body space-y-3">
           <div className="grid grid-cols-2 gap-2">
@@ -329,7 +380,9 @@ export function Studio({
           </form>
           <div className="grid grid-cols-2 gap-2">
             {project.assets.filter((asset) => !asset.parent_asset_id).map((asset) => <button
-              key={asset.id} className="studio-media-tile" onClick={() => {
+              key={asset.id} className="studio-media-tile"
+              data-sag-entity-id={asset.id} data-sag-action-ids="spatial.focus_entity"
+              onClick={() => {
                 const existing = items.find((item) => item.asset_id === asset.id);
                 if (existing) void select(existing);
               }}
@@ -339,13 +392,16 @@ export function Studio({
               </span>
               <span className="truncate text-left text-[11px] text-ink-1">{asset.name}</span>
               <span className="font-mono text-[9px] text-ink-3">{asset.duration_ticks ? timecode(asset.duration_ticks) : asset.kind}</span>
+              <span className={`studio-media-verification ${asset.intake_status === 'observed_valid' ? 'verified' : asset.intake_status === 'observed_invalid' ? 'invalid' : ''}`}>
+                <span>{asset.intake_status.replaceAll('_', ' ')}</span>{asset.sha256 ? <code>{asset.sha256.slice(0, 10)}</code> : null}
+              </span>
             </button>)}
           </div>
           {project.assets.length === 0 ? <EmptyState icon={<Upload size={20} />} title="No media yet" detail="Import a recording to start the cut." /> : null}
         </div>
       </section>
 
-      <section className={`studio-monitor ${mobilePane === 'monitor' ? 'mobile-active' : ''}`} aria-label="Program monitor">
+      <section className={`studio-monitor ${mobilePane === 'monitor' ? 'mobile-active' : ''}`} aria-label="Program monitor" data-sag-entity-id="viewport:monitor" data-sag-action-ids="spatial.frame_entity">
         <div className="studio-stage">
           {mediaUrl && selectedAsset?.kind === 'video' ? <video ref={videoRef} src={mediaUrl} playsInline onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} /> :
             <div className="studio-stage-empty"><MonitorPlay size={30} /><span>{selected ? selected.name : 'Select a clip to preview'}</span></div>}
@@ -362,7 +418,7 @@ export function Studio({
         </div>
       </section>
 
-      <aside className={`studio-panel studio-inspector ${mobilePane === 'inspector' ? 'mobile-active' : ''}`} aria-label="Inspector">
+      <aside className={`studio-panel studio-inspector ${mobilePane === 'inspector' ? 'mobile-active' : ''}`} aria-label="Inspector" data-sag-entity-id="viewport:inspector" data-sag-action-ids="spatial.frame_entity">
         <PanelHeading icon={<SlidersHorizontal size={15} />} title="Inspector" />
         <div className="studio-panel-body">
           {selected ? <Inspector item={selected} disabled={busy !== ''} onCommand={command} onDelete={deleteSelected} /> :
@@ -370,7 +426,7 @@ export function Studio({
         </div>
       </aside>
 
-      <section className={`studio-timeline ${mobilePane === 'timeline' ? 'mobile-active' : ''}`} aria-label="Timeline">
+      <section className={`studio-timeline ${mobilePane === 'timeline' ? 'mobile-active' : ''}`} aria-label="Timeline" data-sag-entity-id="viewport:timeline" data-sag-action-ids="spatial.frame_entity">
         <div className="studio-timeline-toolbar">
           <div className="flex items-center gap-1">
             <button className="studio-icon-button" title="Split selected clip" disabled={!selected || busy !== ''} onClick={() => selected && void command('timeline.split_clip', { item_id: selected.id, at_ticks: selected.start_ticks + Math.floor(selected.duration_ticks / 2) })}><Split size={16} /></button>
@@ -388,6 +444,7 @@ export function Studio({
                 const left = Math.min(98, item.start_ticks / Math.max(project.duration_ticks, 1) * 100);
                 const width = Math.max(4, Math.min(100 - left, item.duration_ticks / Math.max(project.duration_ticks, 1) * 100));
                 return <button key={item.id} className={`studio-clip ${item.id === selectedId ? 'selected' : ''} ${item.kind}`}
+                  data-sag-entity-id={item.id} data-sag-action-ids="spatial.focus_entity,spatial.frame_entity"
                   style={{ left: `${left}%`, width: `${width}%` }} onClick={() => void select(item)}>
                   <span>{item.name}</span><small>{timecode(item.duration_ticks)}</small>
                 </button>;
@@ -436,6 +493,7 @@ export function Studio({
       onClose={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); }}
     /> : null}
     {busy ? <div className="studio-busy" role="status"><LoaderCircle className="animate-spin" size={16} />{busy === 'refresh' ? 'Refreshing' : 'Applying change'}</div> : null}
+    <SpatialAwarenessOverlay frame={awareness.frame} status={awareness.status} />
   </div>;
 }
 
@@ -481,7 +539,7 @@ function SpatialWorkspace({
   );
   const webglAvailable = typeof window !== 'undefined' && 'WebGLRenderingContext' in window;
 
-  return <main className="studio-spatial-workspace" aria-label={`${depth} spatial workspace`}>
+  return <main className="studio-spatial-workspace" aria-label={`${depth} spatial workspace`} data-sag-entity-id="viewport:spatial-workspace" data-sag-action-ids="spatial.reset_view">
     <div className="studio-spatial-toolbar">
       <nav className="studio-breadcrumbs" aria-label="Semantic hierarchy">
         {(breadcrumbs.length ? breadcrumbs : snapshot.entities.slice(0, 3)).map((entity, index) => <span key={entity.id}>
@@ -489,7 +547,7 @@ function SpatialWorkspace({
           <button onClick={() => onSelect(entity.id)}>{entity.label}</button>
         </span>)}
       </nav>
-      <div className="flex items-center gap-1.5">
+      <div className="studio-spatial-controls">
         <span className={`studio-runtime-state ${connection}`} role="status">
           {connection === 'connected' ? <Wifi size={13} /> : <WifiOff size={13} />}
           {connection === 'connected' ? 'Live runtime' : connection === 'connecting' ? 'Connecting' : 'Reconnect pending'}
@@ -596,6 +654,8 @@ function HierarchyTree({
       key={entity.id}
       role="treeitem"
       data-entity-id={entity.id}
+      data-sag-entity-id={entity.id}
+      data-sag-action-ids={entity.eligible_action_ids.join(',')}
       aria-level={level}
       aria-selected={entity.id === selectedId}
       aria-expanded={hasChildren ? !collapsed.has(entity.id) : undefined}
@@ -798,7 +858,14 @@ function ActivityDrawer({
   delivery: { delivery_profiles?: Array<Record<string, any>>; release_approvals?: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }> };
   onClose: () => void;
 }) {
-  return <aside className="studio-activity" aria-label="Governance and receipts">
+  const observed = receipts.filter((receipt) => ['observed_success', 'committed'].includes(receipt.status));
+  const failed = receipts.filter((receipt) => ['observed_failure', 'execution_failed', 'denied'].includes(receipt.status));
+  const latestObserved = [...observed].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))[0];
+  const verification = latestObserved?.payload?.verification ?? latestObserved?.payload?.observation ?? {};
+  const verifiedHash = String(
+    latestObserved?.payload?.artifact_sha256 ?? verification?.sha256 ?? verification?.artifact_sha256 ?? '',
+  );
+  return <aside className="studio-activity" aria-label="Governance and receipts" data-sag-entity-id="viewport:governance" data-sag-action-ids="spatial.frame_entity">
     <div className="studio-panel-heading"><div className="flex items-center gap-2"><Activity size={16} /><h2>Governance</h2></div><button className="studio-icon-button" onClick={onClose}><X size={16} /></button></div>
     <div className="border-b border-border-base p-4 text-[11px] text-ink-1">
       <div className="flex items-center justify-between"><span>Codex authority</span><strong className="text-ink-0">Sequence scoped</strong></div>
@@ -818,6 +885,16 @@ function ActivityDrawer({
       </div>)}
       {(delivery?.release_approvals ?? []).length === 0 ? <p>No release approval has been issued.</p> : null}
     </div>
+    <section className="studio-verification-console" aria-label="Verification console">
+      <header><ShieldCheck size={14} /><strong>Verification console</strong><span>{failed.length ? `${failed.length} failed` : 'no failures'}</span></header>
+      <dl>
+        <div><dt>Observed receipts</dt><dd>{observed.length}/{receipts.length}</dd></div>
+        <div><dt>Current revision</dt><dd>{latestObserved?.project_revision ?? 'none'}</dd></div>
+        <div><dt>Latest receipt</dt><dd><code>{latestObserved?.id ?? 'none'}</code></dd></div>
+        <div><dt>Artifact hash</dt><dd><code>{verifiedHash ? verifiedHash.slice(0, 18) : 'not present'}</code></dd></div>
+      </dl>
+      <p>{latestObserved ? `${latestObserved.command} is ${latestObserved.status.replaceAll('_', ' ')}.` : 'No observed receipt is available yet.'}</p>
+    </section>
     <div className="studio-activity-list">
       {receipts.map((receipt) => <details key={receipt.id} className="studio-receipt">
         <summary><span className={`receipt-status ${receipt.status}`}>{receipt.status.replaceAll('_', ' ')}</span><span className="truncate">{receipt.command}</span><ChevronDown size={14} /></summary>

@@ -33,6 +33,15 @@ export type CreativeBrief = {
 export type StoryboardScene = {
   id: string; start_seconds: number; duration_seconds: number; purpose: string; narration: string;
   visual_direction: string; evidence_refs: string[]; generation_model: string; locked?: boolean;
+  spatial_layout?: {
+    coordinate_space: 'normalized_0_1'; columns: number; rows: number;
+    regions: Array<{
+      id: string; purpose: 'authentic_reference' | 'readable_text' | 'safe_motion' | 'caption_safe' | 'cta' | 'protected';
+      x: number; y: number; width: number; height: number;
+      behavior: 'preserve' | 'animate' | 'avoid' | 'replace';
+      source_asset_id?: string | null; evidence_refs: string[];
+    }>;
+  } | null;
 };
 
 export type Storyboard = {
@@ -48,6 +57,22 @@ export type GenerationOperation = {
   kind: 'video' | 'music' | 'narration'; scene_id?: string; request_id: string; model: string;
   provider?: string; operation_name: string; state: string; asset_id?: string; error_code?: string;
   error_detail?: string; output?: Record<string, unknown>;
+};
+
+export type PromptModulePreview = {
+  id: string; label: string; stage: 'direction' | 'planning' | 'generation' | 'finishing';
+  component: string; model?: string | null; content: string; content_sha256: string;
+  estimated_tokens: number; dispatch: 'planning_context' | 'provider_input' | 'derived_provider_input' | 'not_connected';
+  editable_field?: string | null; consumers: string[]; warnings: string[];
+};
+
+export type PromptStudioPreview = {
+  schema_version: string; resolved_prompt_revision: string; modules: PromptModulePreview[];
+  warnings: string[]; dispatch_allowed: boolean; model_registry_version: string; model_registry_hash: string;
+  models: Array<{
+    id: string; provider: string; family: string; lifecycle: string; capabilities: string[];
+    input_modalities: string[]; output_modalities: string[]; default_for: string[]; notes: string;
+  }>;
 };
 
 const baseUrl = () => (process.env.SAG_ENGINE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
@@ -220,6 +245,34 @@ export const sagEngine = {
       method: 'POST', body: JSON.stringify(directive),
     },
   ),
+  currentSpatialFrame: (workspaceId: string, projectId: string) =>
+    engineFetch<Record<string, unknown>>(
+      workspaceId, `/api/projects/${encodeURIComponent(projectId)}/spatial/frames/current`,
+    ),
+  spatialFrame: (workspaceId: string, projectId: string, frameId: string) =>
+    engineFetch<Record<string, unknown>>(
+      workspaceId, `/api/projects/${encodeURIComponent(projectId)}/spatial/frames/${encodeURIComponent(frameId)}`,
+    ),
+  declareSpatialFrame: (workspaceId: string, projectId: string, frame: Record<string, unknown>) =>
+    engineFetch<Record<string, unknown>>(
+      workspaceId, `/api/projects/${encodeURIComponent(projectId)}/spatial/frames`, {
+        method: 'POST', body: JSON.stringify(frame),
+      },
+    ),
+  resolveSpatialRegion: (
+    workspaceId: string, projectId: string, frameId: string, request: Record<string, unknown>,
+  ) => engineFetch<Record<string, unknown>>(
+    workspaceId,
+    `/api/projects/${encodeURIComponent(projectId)}/spatial/frames/${encodeURIComponent(frameId)}/resolve`,
+    { method: 'POST', body: JSON.stringify(request) },
+  ),
+  recordSpatialObservation: (
+    workspaceId: string, projectId: string, observation: Record<string, unknown>,
+  ) => engineFetch<Record<string, unknown>>(
+    workspaceId, `/api/projects/${encodeURIComponent(projectId)}/spatial/observations`, {
+      method: 'POST', body: JSON.stringify(observation),
+    },
+  ),
   semanticGraph: (workspaceId: string, projectId: string, revision?: number) =>
     engineFetch<Record<string, unknown>>(
       workspaceId,
@@ -292,6 +345,12 @@ export const sagEngine = {
     engineFetch<{ brief: CreativeBrief; receipt: EngineReceipt }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/director/brief`, {
       method: 'POST', body: JSON.stringify(request),
     }),
+  previewRepoToVideoPrompts: (workspaceId: string, projectId: string, request: {
+    creative_instruction: string; creative_brief?: CreativeBrief; storyboard?: Storyboard;
+    aspect_ratio: '9:16' | '16:9'; active_scene_id?: string;
+  }) => engineFetch<PromptStudioPreview>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/prompts/preview`, {
+    method: 'POST', body: JSON.stringify(request),
+  }),
   commitRepoToVideoStoryboard: (workspaceId: string, projectId: string, request: { receipt_id: string; expected_revision: number; confirmation_id: string; storyboard: Storyboard }) =>
     engineFetch<{ receipt: EngineReceipt; idempotent?: boolean }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/storyboard/commit`, {
       method: 'POST', body: JSON.stringify(request), headers: { 'x-sag-human-confirmation': request.confirmation_id },

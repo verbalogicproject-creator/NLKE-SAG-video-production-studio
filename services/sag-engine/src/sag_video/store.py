@@ -609,6 +609,36 @@ class Store:
             ).fetchall()
             return [self._runtime_event_dict(row) for row in rows]
 
+    def get_runtime_event(self, project_id: str, event_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM sag_runtime_events WHERE project_id=? AND event_id=?",
+                (project_id, event_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(event_id)
+            return self._runtime_event_dict(row)
+
+    def latest_runtime_event(self, project_id: str, kind: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT * FROM sag_runtime_events
+                   WHERE project_id=? AND kind=? ORDER BY cursor DESC LIMIT 1""",
+                (project_id, kind),
+            ).fetchone()
+            return self._runtime_event_dict(row) if row is not None else None
+
+    def find_runtime_event(self, project_id: str, kind: str, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT * FROM sag_runtime_events
+                   WHERE project_id=? AND kind=? AND session_id=? ORDER BY cursor DESC LIMIT 1""",
+                (project_id, kind, session_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            return self._runtime_event_dict(row)
+
     def runtime_cursor_bounds(self, project_id: str) -> tuple[int | None, int | None]:
         row = self._connection.execute(
             "SELECT MIN(cursor) AS oldest,MAX(cursor) AS newest FROM sag_runtime_events WHERE project_id=?",

@@ -1,6 +1,6 @@
 'use client';
 
-import { Html, Line, OrbitControls } from '@react-three/drei';
+import { Bounds, Html, Line, OrbitControls } from '@react-three/drei';
 import { Canvas } from '@react-three/fiber';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -37,42 +37,44 @@ function Scene({
     <color attach="background" args={['#0e1013']} />
     <ambientLight intensity={1.25} />
     <directionalLight position={[25, 35, 40]} intensity={1.8} color="#dce9ef" />
-    {edges.map((edge) => {
-      const source = positions.get(edge.source);
-      const target = positions.get(edge.target);
-      if (!source || !target) return null;
-      return <Line
-        key={edge.id}
-        points={[source, target]}
-        color="#3f4851"
-        transparent
-        opacity={edge.relationship_kind === 'contains' ? 0.34 : 0.7}
-        lineWidth={0.7}
-      />;
-    })}
-    {entities.map((entity) => {
-      const position = positions.get(entity.id)!;
-      const selected = entity.id === selectedId;
-      const width = Math.max(1.4, Math.min(12, entity.bounds.width / 2));
-      return <group key={entity.id} position={position}>
-        <mesh
-          onClick={(event) => { event.stopPropagation(); onSelect(entity.id); }}
-          scale={[width, 1.25, entity.kind === 'semantic_layer' ? 0.4 : 0.8]}
-        >
-          <boxGeometry />
-          <meshStandardMaterial
-            color={selected ? '#5bb9e3' : entity.kind === 'semantic_layer' ? '#273039' : '#20272d'}
-            emissive={selected ? '#16394a' : '#0e1013'}
-            roughness={0.78}
-            metalness={0.08}
-          />
-        </mesh>
-        <Html center distanceFactor={26} occlude={false} style={{ pointerEvents: 'none' }}>
-          <span className={`spatial-canvas-label ${selected ? 'selected' : ''}`}>{entity.label}</span>
-        </Html>
-      </group>;
-    })}
     <OrbitControls makeDefault enableDamping={false} minDistance={12} maxDistance={180} />
+    <Bounds fit clip observe margin={1.35}>
+      {edges.map((edge) => {
+        const source = positions.get(edge.source);
+        const target = positions.get(edge.target);
+        if (!source || !target) return null;
+        return <Line
+          key={edge.id}
+          points={[source, target]}
+          color="#3f4851"
+          transparent
+          opacity={edge.relationship_kind === 'contains' ? 0.34 : 0.7}
+          lineWidth={0.7}
+        />;
+      })}
+      {entities.map((entity) => {
+        const position = positions.get(entity.id)!;
+        const selected = entity.id === selectedId;
+        const width = Math.max(1.4, Math.min(12, entity.bounds.width / 2));
+        return <group key={entity.id} position={position}>
+          <mesh
+            onClick={(event) => { event.stopPropagation(); onSelect(entity.id); }}
+            scale={[width, 1.25, entity.kind === 'semantic_layer' ? 0.4 : 0.8]}
+          >
+            <boxGeometry />
+            <meshStandardMaterial
+              color={selected ? '#5bb9e3' : entity.kind === 'semantic_layer' ? '#273039' : '#20272d'}
+              emissive={selected ? '#16394a' : '#0e1013'}
+              roughness={0.78}
+              metalness={0.08}
+            />
+          </mesh>
+          <Html center distanceFactor={26} occlude={false} style={{ pointerEvents: 'none' }}>
+            <span className={`spatial-canvas-label ${selected ? 'selected' : ''}`}>{entity.label}</span>
+          </Html>
+        </group>;
+      })}
+    </Bounds>
   </>;
 }
 

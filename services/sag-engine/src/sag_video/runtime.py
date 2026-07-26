@@ -81,6 +81,22 @@ EVENT_DEFINITIONS = tuple(
         RuntimeEventDefinition(kind="spatial.directive.consumed", json_schema=_schema(["receipt_id"]), retention_class="audit"),
         RuntimeEventDefinition(kind="spatial.directive.failed", json_schema=_schema(["receipt_id"]), retention_class="audit"),
         RuntimeEventDefinition(kind="spatial.directive.timeout", json_schema=_schema(["receipt_id"]), retention_class="audit"),
+        RuntimeEventDefinition(
+            kind="spatial.frame.declared", version=1,
+            json_schema=_schema(["frame"]), release_status="experimental",
+        ),
+        RuntimeEventDefinition(
+            kind="spatial.bindings.reconciled", version=1,
+            json_schema=_schema(["frame_id", "bindings"]), release_status="experimental",
+        ),
+        RuntimeEventDefinition(
+            kind="spatial.action.routed", version=1,
+            json_schema=_schema(["action", "route"]), release_status="experimental",
+        ),
+        RuntimeEventDefinition(
+            kind="spatial.effect.observed", version=1,
+            json_schema=_schema(["observation"]), release_status="experimental",
+        ),
     )
 )
 

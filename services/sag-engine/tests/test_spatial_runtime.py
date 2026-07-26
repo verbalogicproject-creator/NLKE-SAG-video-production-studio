@@ -172,3 +172,173 @@ def test_protected_provider_connection_projects_only_sanitized_summary(client):
     assert "ciphertext-not-plaintext-value" not in encoded
     revoked = client.delete(f"/api/workspaces/demo/connections/{connection['id']}")
     assert revoked.json()["state"] == "revoked"
+
+
+def _frame_body(snapshot, frame_id: str, *, bindings=None, **overrides):
+    body = {
+        "frame_id": frame_id,
+        "canonical_revision": snapshot["canonical_revision"],
+        "projection_hash": snapshot["projection_hash"],
+        "runtime_cursor": snapshot["runtime_cursor"],
+        "active_depth": "edit",
+        "viewport": {
+            "width_css_px": 400, "height_css_px": 800, "device_pixel_ratio": 2,
+            "scroll_x_css_px": 0, "scroll_y_css_px": 0,
+        },
+        "bindings": bindings or [],
+        "redaction_state": "metadata_only",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_spatial_frame_declares_adaptive_grid_and_resolves_semantic_regions(client):
+    snapshot = client.get("/api/projects/demo/spatial/snapshot?depth=system").json()
+    binding = {
+        "binding_id": "binding_clip_terminal",
+        "entity_id": "clip_terminal", "role": "button", "label": "Terminal clip",
+        "rect": {"x": 0.2, "y": 0.5, "width": 0.4, "height": 0.1},
+        "cells": ["B6", "C6", "B7", "C7"],
+        "eligible_action_ids": ["spatial.focus_entity"],
+        "source": "dom", "confidence": 1,
+    }
+    declared = client.post(
+        "/api/projects/demo/spatial/frames",
+        json=_frame_body(snapshot, "frame_acceptance_0001", bindings=[binding]),
+    )
+    assert declared.status_code == 201, declared.text
+    frame = declared.json()
+    assert frame["grid"]["columns"] == 5
+    assert frame["grid"]["rows"] == 10
+    assert frame["redaction_state"] == "metadata_only"
+    assert client.get("/api/projects/demo/spatial/frames/current").json()["frame_id"] == frame["frame_id"]
+    resolved = client.post(
+        f"/api/projects/demo/spatial/frames/{frame['frame_id']}/resolve",
+        json={"cell": "B6", "minimum_confidence": 0.9},
+    ).json()
+    assert [entry["entity_id"] for entry in resolved["matches"]] == ["clip_terminal"]
+    by_point = client.post(
+        f"/api/projects/demo/spatial/frames/{frame['frame_id']}/resolve",
+        json={"point": {"x": 0.3, "y": 0.55}},
+    ).json()
+    assert by_point["matches"][0]["binding_id"] == "binding_clip_terminal"
+
+
+def test_frame_bound_directive_requires_matching_before_and_valid_after_frame(client):
+    snapshot = client.get("/api/projects/demo/spatial/snapshot?depth=system").json()
+    binding = {
+        "binding_id": "binding_clip_terminal", "entity_id": "clip_terminal",
+        "rect": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.1},
+        "cells": ["A3", "B3"], "eligible_action_ids": ["spatial.focus_entity"],
+    }
+    before = client.post(
+        "/api/projects/demo/spatial/frames",
+        json=_frame_body(snapshot, "frame_before_directive", bindings=[binding]),
+    ).json()
+    dispatched = client.post(
+        "/api/projects/demo/spatial/directives",
+        json={
+            "action": "spatial.focus_entity", "target_ids": ["clip_terminal"],
+            "expected_revision": snapshot["canonical_revision"],
+            "expected_projection_hash": snapshot["projection_hash"],
+            "expected_frame_id": before["frame_id"], "binding_id": binding["binding_id"],
+        },
+    )
+    assert dispatched.status_code == 200, dispatched.text
+    after_snapshot = client.get("/api/projects/demo/spatial/snapshot?depth=system").json()
+    after = client.post(
+        "/api/projects/demo/spatial/frames",
+        json=_frame_body(after_snapshot, "frame_after_directive", bindings=[binding]),
+    ).json()
+    receipt_id = dispatched.json()["receipt"]["id"]
+    ack = client.post(
+        f"/api/spatial/directives/{receipt_id}/ack",
+        json={
+            "consumer_id": "studio-browser", "projection_hash": snapshot["projection_hash"],
+            "observed_target_ids": ["clip_terminal"], "active_depth": "context",
+            "renderer_mode": "dom_tree", "before_frame_id": before["frame_id"],
+            "after_frame_id": after["frame_id"], "changed_entity_ids": ["clip_terminal"],
+            "changed_cells": ["A3"],
+            "action_route": {
+                "kind": "semantic_handler", "action": "spatial.focus_entity",
+                "target_id": "clip_terminal", "binding_id": binding["binding_id"], "confidence": 1,
+            },
+        },
+    )
+    assert ack.status_code == 200
+    assert ack.json()["status"] == "observed_success"
+    assert ack.json()["payload"]["frame_match"] is True
+    assert ack.json()["payload"]["after_frame_valid"] is True
+
+
+def test_spatial_frames_reject_raw_media_unknown_entities_and_unsafe_coordinate_routes(client):
+    snapshot = client.get("/api/projects/demo/spatial/snapshot?depth=system").json()
+    raw = _frame_body(snapshot, "frame_raw_rejected")
+    raw["raw_screenshot"] = "data:image/png;base64,secret"
+    assert client.post("/api/projects/demo/spatial/frames", json=raw).status_code == 422
+    unknown = _frame_body(snapshot, "frame_unknown_binding", bindings=[{
+        "binding_id": "binding_unknown_entity", "entity_id": "unknown-control",
+        "rect": {"x": 0, "y": 0, "width": 0.2, "height": 0.2}, "cells": ["A1"],
+    }])
+    assert client.post("/api/projects/demo/spatial/frames", json=unknown).status_code == 422
+
+    before = client.post(
+        "/api/projects/demo/spatial/frames", json=_frame_body(snapshot, "frame_safe_before_01"),
+    ).json()
+    after = client.post(
+        "/api/projects/demo/spatial/frames", json=_frame_body(snapshot, "frame_safe_after_001"),
+    ).json()
+    unsafe = client.post("/api/projects/demo/spatial/observations", json={
+        "observation_id": "observation_unsafe_coordinate",
+        "before_frame_id": before["frame_id"], "after_frame_id": after["frame_id"],
+        "expected_revision": snapshot["canonical_revision"],
+        "expected_projection_hash": snapshot["projection_hash"],
+        "route": {
+            "kind": "coordinate_fallback", "action": "release.approve",
+            "confidence": 1,
+        },
+    })
+    assert unsafe.status_code == 422
+    assert "sensitive actions" in unsafe.text
+
+
+def test_gemini_bindings_are_opt_in_redacted_and_reconciled(client, monkeypatch):
+    snapshot = client.get("/api/projects/demo/spatial/snapshot?depth=system").json()
+    binding = {
+        "binding_id": "binding_gemini_clip_terminal",
+        "entity_id": "clip_terminal",
+        "role": "region",
+        "label": "Observed terminal clip",
+        "rect": {"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.2},
+        "cells": ["A3", "B3"],
+        "source": "gemini",
+        "confidence": 0.96,
+    }
+    disabled = client.post(
+        "/api/projects/demo/spatial/frames",
+        json=_frame_body(snapshot, "frame_gemini_disabled_01", bindings=[binding], redaction_state="redacted"),
+    )
+    assert disabled.status_code == 422
+    assert "disabled" in disabled.text
+
+    monkeypatch.setenv("SAG_GEMINI_OBSERVER_ENABLED", "1")
+    unredacted = client.post(
+        "/api/projects/demo/spatial/frames",
+        json=_frame_body(snapshot, "frame_gemini_unredacted", bindings=[binding]),
+    )
+    assert unredacted.status_code == 422
+    assert "redacted" in unredacted.text
+
+    declared = client.post(
+        "/api/projects/demo/spatial/frames",
+        json=_frame_body(snapshot, "frame_gemini_redacted_01", bindings=[binding], redaction_state="redacted"),
+    )
+    assert declared.status_code == 201, declared.text
+    history = client.get("/api/projects/demo/runtime/events?cursor=0").json()
+    reconciled = [event for event in history["events"] if event["kind"] == "spatial.bindings.reconciled"]
+    assert reconciled[-1]["payload"]["bindings"] == [{
+        "binding_id": binding["binding_id"],
+        "entity_id": "clip_terminal",
+        "source": "gemini",
+        "confidence": 0.96,
+    }]

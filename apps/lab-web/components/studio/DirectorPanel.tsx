@@ -3,14 +3,16 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, Clapperboard, FileCode2,
-  GitBranch, GitCompare, Lock, Play, RefreshCw, Save, Sparkles, Unlock, X,
+  GitBranch, GitCompare, Grid3X3, Lock, Mic2, Play, Plus, RefreshCw, Save, Sparkles, Trash2,
+  Unlock, Volume2, X,
 } from 'lucide-react';
 import type {
   CreativeBrief, DirectorInput, EngineReceipt, GenerationOperation, RepositoryEvidence, Storyboard,
   StoryboardScene,
 } from '@/lib/engine';
+import { PromptStudio, type PromptVersion } from './PromptStudio';
 
-type DirectorTab = 'direction' | 'brief' | 'storyboard' | 'queue';
+type DirectorTab = 'direction' | 'brief' | 'prompts' | 'storyboard' | 'queue';
 type EvidenceState = {
   evidence: RepositoryEvidence; evidence_revision: string;
   redaction: { status: string; bounded: boolean }; factuality: { status: string };
@@ -23,6 +25,7 @@ type QueueEntry = {
 };
 type DirectorSession = {
   input: DirectorInput; evidence?: EvidenceState; brief?: CreativeBrief; briefVersions: BriefVersion[];
+  promptVersions: PromptVersion[];
   briefApproved: boolean; storyboard?: Storyboard; storyboardReceipt?: EngineReceipt;
   storyboardApproved: boolean; generationReceiptId?: string; queue: QueueEntry[]; activeTab: DirectorTab;
 };
@@ -37,7 +40,7 @@ const DEFAULT_INPUT: DirectorInput = {
 };
 
 function blankSession(): DirectorSession {
-  return { input: DEFAULT_INPUT, briefVersions: [], briefApproved: false, storyboardApproved: false, queue: [], activeTab: 'direction' };
+  return { input: DEFAULT_INPUT, briefVersions: [], promptVersions: [], briefApproved: false, storyboardApproved: false, queue: [], activeTab: 'direction' };
 }
 
 function operationState(operation: GenerationOperation): string {
@@ -86,6 +89,14 @@ function storyboardProblems(storyboard: Storyboard | undefined, evidenceRevision
   for (const scene of storyboard.scenes) {
     if (scene.start_seconds < previousEnd - 0.01) problems.push(`${scene.id} overlaps the previous scene.`);
     if (!scene.evidence_refs.length) problems.push(`${scene.id} has narration without an evidence reference.`);
+    for (const region of scene.spatial_layout?.regions ?? []) {
+      if (region.x + region.width > 1.000001 || region.y + region.height > 1.000001) {
+        problems.push(`${scene.id} region ${region.id} exceeds the normalized frame.`);
+      }
+      if (region.purpose === 'authentic_reference' && !region.source_asset_id) {
+        problems.push(`${scene.id} authentic region ${region.id} needs a source asset.`);
+      }
+    }
     previousEnd = scene.start_seconds + scene.duration_seconds;
   }
   if (previousEnd > duration + 0.01) problems.push(`Storyboard ends at ${previousEnd.toFixed(1)}s, beyond the requested ${duration}s.`);
@@ -267,16 +278,16 @@ export function DirectorPanel({
     });
   }
 
-  if (!hydrated) return <aside className="director-panel" aria-label="Director"><div className="director-loading">Loading saved direction</div></aside>;
+  if (!hydrated) return <aside className="director-panel" aria-label="Director" data-sag-entity-id="viewport:director" data-sag-action-ids="spatial.frame_entity"><div className="director-loading">Loading saved direction</div></aside>;
 
-  return <aside className="director-panel" aria-label="Director workspace">
+  return <aside className="director-panel" aria-label="Director workspace" data-sag-entity-id="viewport:director" data-sag-action-ids="spatial.frame_entity">
     <header className="director-header">
       <div><Sparkles size={17} /><div><h2>Director</h2><span>Repository to verified timeline</span></div></div>
       <button className="studio-icon-button" onClick={onClose} aria-label="Close Director"><X size={16} /></button>
     </header>
 
     <div className="director-tabs" role="tablist" aria-label="Director workflow">
-      {(['direction', 'brief', 'storyboard', 'queue'] as const).map((tab) => <button
+      {(['direction', 'brief', 'prompts', 'storyboard', 'queue'] as const).map((tab) => <button
         key={tab} role="tab" aria-selected={session.activeTab === tab} className={session.activeTab === tab ? 'active' : ''}
         onClick={() => setSession((current) => ({ ...current, activeTab: tab }))}
       >{tab === 'direction' ? 'Direction' : tab.charAt(0).toUpperCase() + tab.slice(1)}</button>)}
@@ -297,6 +308,13 @@ export function DirectorPanel({
           queue: current.queue.map((entry) => entry.kind === 'brief' && entry.state === 'awaiting approval' ? { ...entry, state: 'accepted' } : entry),
         }))} onRegenerate={generateBrief}
         onStoryboard={() => void generateStoryboard()}
+      /> : null}
+      {session.activeTab === 'prompts' ? <PromptStudio
+        projectId={projectId} sequenceId={sequenceId} input={session.input} brief={session.brief}
+        storyboard={session.storyboard} versions={session.promptVersions} onInput={updateInput} onBrief={updateBrief}
+        onSaveVersion={(version) => setSession((current) => ({
+          ...current, promptVersions: [...current.promptVersions, version].slice(-40),
+        }))}
       /> : null}
       {session.activeTab === 'storyboard' ? <StoryboardTab
         storyboard={session.storyboard} problems={problems} approved={session.storyboardApproved} briefApproved={session.briefApproved}
@@ -396,15 +414,68 @@ function StoryboardTab({ storyboard, problems, approved, briefApproved, busy, on
         <DirectorField label="Narration"><textarea disabled={scene.locked} className="compact" value={scene.narration} onChange={(event) => onChange(scene.id, { narration: event.target.value })} /></DirectorField>
         <DirectorField label="Visual direction"><textarea disabled={scene.locked} value={scene.visual_direction} onChange={(event) => onChange(scene.id, { visual_direction: event.target.value })} /></DirectorField>
         <DirectorField label="Evidence references"><textarea disabled={scene.locked} className="compact" value={scene.evidence_refs.join('\n')} onChange={(event) => onChange(scene.id, { evidence_refs: event.target.value.split('\n').map((value) => value.trim()).filter(Boolean) })} /></DirectorField>
+        <SpatialLayoutEditor scene={scene} disabled={Boolean(scene.locked)} onChange={(spatial_layout) => onChange(scene.id, { spatial_layout })} />
       </article>)}
     </div>
     <div className="director-approval"><div><strong>{approved ? 'Storyboard approved' : 'Human consent required'}</strong><span>{approved ? 'Bound to the current project and evidence revisions.' : 'The proposal receipt is awaiting explicit human consent.'}</span></div>{approved ? <button className="studio-button primary" onClick={() => void onGenerate()} disabled={Boolean(busy)}><Play size={14} />Generate assets</button> : <button className="studio-button primary" onClick={() => void onApprove()} disabled={Boolean(busy) || problems.length > 0 || !briefApproved}><Check size={14} />Approve storyboard</button>}</div>
   </div>;
 }
 
+function SpatialLayoutEditor({
+  scene, disabled, onChange,
+}: {
+  scene: StoryboardScene;
+  disabled: boolean;
+  onChange: (layout: NonNullable<StoryboardScene['spatial_layout']>) => void;
+}) {
+  const layout = scene.spatial_layout;
+  if (!layout) return <button className="studio-button secondary director-spatial-add" disabled={disabled} onClick={() => onChange({
+    coordinate_space: 'normalized_0_1', columns: 5, rows: 10, regions: [],
+  })}><Grid3X3 size={14} />Add spatial contract</button>;
+  const activeLayout: NonNullable<StoryboardScene['spatial_layout']> = layout;
+  function patchRegion(index: number, patch: Partial<(typeof activeLayout.regions)[number]>) {
+    onChange({ ...activeLayout, regions: activeLayout.regions.map((region, regionIndex) => regionIndex === index ? { ...region, ...patch } : region) });
+  }
+  return <section className="director-spatial-layout" aria-label={`${scene.id} spatial contract`}>
+    <header><div><Grid3X3 size={14} /><strong>Spatial contract</strong></div><span>{activeLayout.columns} by {activeLayout.rows} address grid</span></header>
+    {activeLayout.regions.map((region, index) => <div className="director-region" key={region.id}>
+      <div className="director-region-heading"><input aria-label="Region ID" disabled={disabled} value={region.id} onChange={(event) => patchRegion(index, { id: event.target.value })} /><button disabled={disabled} aria-label={`Remove ${region.id}`} onClick={() => onChange({ ...activeLayout, regions: activeLayout.regions.filter((_, regionIndex) => regionIndex !== index) })}><Trash2 size={13} /></button></div>
+      <div className="director-region-routing"><select aria-label="Region purpose" disabled={disabled} value={region.purpose} onChange={(event) => patchRegion(index, { purpose: event.target.value as typeof region.purpose })}><option value="authentic_reference">Authentic reference</option><option value="readable_text">Readable text</option><option value="safe_motion">Safe motion</option><option value="caption_safe">Caption safe</option><option value="cta">CTA</option><option value="protected">Protected</option></select><select aria-label="Region behavior" disabled={disabled} value={region.behavior} onChange={(event) => patchRegion(index, { behavior: event.target.value as typeof region.behavior })}><option value="preserve">Preserve</option><option value="animate">Animate</option><option value="avoid">Avoid</option><option value="replace">Replace</option></select></div>
+      <div className="director-region-bounds">{(['x', 'y', 'width', 'height'] as const).map((key) => <label key={key}><span>{key}</span><input aria-label={`Region ${key}`} disabled={disabled} type="number" min="0" max="1" step="0.01" value={region[key]} onChange={(event) => patchRegion(index, { [key]: Number(event.target.value) })} /></label>)}</div>
+      {region.purpose === 'authentic_reference' ? <label className="director-region-source"><span>Source asset ID</span><input disabled={disabled} value={region.source_asset_id ?? ''} onChange={(event) => patchRegion(index, { source_asset_id: event.target.value })} /></label> : null}
+    </div>)}
+    <button className="studio-button secondary director-spatial-add" disabled={disabled || activeLayout.regions.length >= 24} onClick={() => onChange({
+      ...activeLayout,
+      regions: [...activeLayout.regions, {
+        id: `region_${scene.id.replace(/^scene_/, '')}_${activeLayout.regions.length + 1}`,
+        purpose: 'safe_motion', x: 0.1, y: 0.1, width: 0.8, height: 0.8,
+        behavior: 'animate', evidence_refs: [],
+      }],
+    })}><Plus size={14} />Add region</button>
+  </section>;
+}
+
 function QueueTab({ entries, now, busy, onPoll }: { entries: QueueEntry[]; now: number; busy: string; onPoll: () => Promise<void> }) {
   if (!entries.length) return <DirectorEmpty icon={<Activity size={22} />} title="Queue is empty" detail="Approved storyboard generation operations appear here." />;
-  return <div className="director-stack"><div className="director-queue-heading"><div><h3>Generation operations</h3><p>Provider results are downloaded, observed, verified, then inserted by the engine.</p></div><button className="studio-button secondary" disabled={Boolean(busy)} onClick={() => void onPoll()}><RefreshCw size={14} />Refresh</button></div><div className="director-queue">{entries.map((entry) => <article key={entry.id}>
+  const generated = entries.filter((entry) => ['video', 'music', 'narration'].includes(entry.kind));
+  const routeSummary = (kind: string) => {
+    const matching = generated.filter((entry) => entry.kind === kind);
+    const inserted = matching.filter((entry) => entry.state === 'inserted').length;
+    const failed = matching.filter((entry) => entry.state === 'failed').length;
+    return { count: matching.length, inserted, failed, state: failed ? 'failure' : matching.length && inserted === matching.length ? 'success' : '' };
+  };
+  const video = routeSummary('video');
+  const music = routeSummary('music');
+  const narration = routeSummary('narration');
+  const inserted = generated.filter((entry) => entry.state === 'inserted').length;
+  return <div className="director-stack"><div className="director-queue-heading"><div><h3>Generation operations</h3><p>Provider results are downloaded, observed, verified, then inserted by the engine.</p></div><button className="studio-button secondary" disabled={Boolean(busy)} onClick={() => void onPoll()}><RefreshCw size={14} />Refresh</button></div>
+    {generated.length ? <section className="director-production-flow" aria-label="Production routing status">
+      <div className={video.state}><Clapperboard size={14} /><span>Scenes</span><strong>{video.inserted}/{video.count}</strong></div>
+      <div className={music.state}><Volume2 size={14} /><span>Music</span><strong>{music.inserted}/{music.count}</strong></div>
+      <div className={narration.state}><Mic2 size={14} /><span>Narration</span><strong>{narration.inserted}/{narration.count}</strong></div>
+      <div className={inserted === generated.length ? 'success' : ''}><Check size={14} /><span>Timeline</span><strong>{inserted}/{generated.length}</strong></div>
+    </section> : null}
+    <div className="director-queue">{entries.map((entry) => <article key={entry.id}>
     <header><div><strong>{entry.sceneId ?? entry.kind}</strong><span>{entry.kind}</span></div><span className={`director-state ${entry.state === 'failed' ? 'failure' : entry.state === 'inserted' ? 'success' : ''}`}>{entry.state}</span></header>
     <dl><div><dt>Provider</dt><dd>{entry.provider}</dd></div><div><dt>Model</dt><dd>{entry.model}</dd></div><div><dt>Elapsed</dt><dd>{Math.max(0, Math.floor((now - new Date(entry.startedAt).getTime()) / 1000))}s</dd></div><div><dt>Cost / quota</dt><dd>Not reported</dd></div></dl>
     <details><summary>Operation and receipt <ChevronDown size={13} /></summary><code>{entry.operationName}</code><code>{entry.receiptId}</code>{entry.assetId ? <code>Asset {entry.assetId}</code> : null}</details>

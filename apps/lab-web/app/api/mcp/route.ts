@@ -51,10 +51,21 @@ async function callTool(request: Request, name: string, input: Record<string, un
     if (name === 'spatial.blast_radius') return sagEngine.spatialBlastRadius(
       workspaceId, sequence.engineProjectId, String(input.entityId),
     );
+    if (name === 'spatial.frame.current') return sagEngine.currentSpatialFrame(
+      workspaceId, sequence.engineProjectId,
+    );
+    if (name === 'spatial.region.resolve') return sagEngine.resolveSpatialRegion(
+      workspaceId, sequence.engineProjectId, String(input.frameId), {
+        entity_id: input.entityId, cell: input.cell, point: input.point,
+        minimum_confidence: input.minimumConfidence ?? 0.5,
+      },
+    );
     if (name === 'spatial.directive') return sagEngine.requestSpatialDirective(
       workspaceId, sequence.engineProjectId, {
         action: input.action, target_ids: input.targetIds ?? [], expected_revision: input.expectedRevision,
         expected_projection_hash: input.expectedProjectionHash, trace_id: input.traceId,
+        expected_frame_id: input.expectedFrameId, binding_id: input.bindingId,
+        preferred_interaction_route: 'semantic_handler',
         intended_observed_effect: { target_ids: input.targetIds ?? [] },
       },
     );

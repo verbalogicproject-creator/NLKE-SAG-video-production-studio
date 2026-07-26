@@ -7,16 +7,22 @@ from sag_video.generative import ProviderOperation
 from sag_video.models import ReceiptStatus
 from sag_video.repo_to_video import (
     CreativeBrief,
+    RepoStoryboard,
     RepoVideoRequest,
     RepositoryEvidence,
     StoryboardScene,
+    SceneSpatialLayout,
+    StoryboardRegion,
     aspect_ratio_for_platform,
     creative_director_prompt,
     evidence_prompt,
     evidence_revision,
     parse_creative_brief,
     parse_storyboard,
+    prompt_studio_preview,
+    PromptStudioPreviewRequest,
     redact,
+    resolved_generation_prompt_revision,
     scene_generation_prompt,
     scene_negative_prompt,
     storyboard_response_schema,
@@ -28,6 +34,24 @@ def test_repository_url_is_bounded_to_github():
     assert request.repository_url == "https://github.com/example/project"
     with pytest.raises(ValueError):
         RepoVideoRequest(repository_url="https://evil.example/example/project")
+
+
+def test_prompt_studio_contract_and_preview_are_read_only(client):
+    contract = client.get("/api/contract").json()
+    assert contract["prompt_studio_schema_version"] == "sag-prompt-studio/0.1"
+    assert "PromptStudioPreviewRequest" in contract["prompt_studio_schemas"]
+    before = len(client.get("/api/projects/demo/receipts").json())
+    response = client.post("/api/projects/demo/repo-to-video/prompts/preview", json={
+        "creative_instruction": "Create an evidence-bound developer tutorial.",
+        "aspect_ratio": "9:16",
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["modules"][0]["id"] == "direction.instruction"
+    assert body["models"]
+    assert len(body["resolved_prompt_revision"]) == 64
+    after = len(client.get("/api/projects/demo/receipts").json())
+    assert after == before
 
 
 def test_repository_evidence_redacts_secrets():
@@ -86,6 +110,74 @@ def test_official_prompt_anatomy_is_encoded_for_omni_and_veo():
     assert "unreadable interface text" in scene_negative_prompt(aspect_ratio="9:16")
     assert aspect_ratio_for_platform("youtube_16_9") == "16:9"
     assert aspect_ratio_for_platform("youtube_shorts") == "9:16"
+
+
+def test_scene_spatial_contract_preserves_authentic_regions_in_generation_prompt():
+    brief = CreativeBrief(
+        title="Demo", logline="Factual demo", audience_promise="Understand it", tone="precise",
+        visual_language="authentic product footage", narrative_arc=["hook", "proof", "cta"],
+        omni_prompt="Preserve the supplied Studio capture.", veo_prompt="Controlled motion around the supplied frame.",
+        music_prompt="pulse", narration_guidance="clear", evidence_revision="evidence-1",
+    )
+    layout = SceneSpatialLayout(regions=[
+        StoryboardRegion(
+            id="region_studio", purpose="authentic_reference", behavior="preserve",
+            x=0.05, y=0.1, width=0.9, height=0.65, source_asset_id="asset_studio_capture",
+            evidence_refs=["README.md"],
+        ),
+        StoryboardRegion(
+            id="region_motion", purpose="safe_motion", behavior="animate",
+            x=0.05, y=0.78, width=0.9, height=0.12,
+        ),
+    ])
+    scene = StoryboardScene(
+        id="scene_authentic", start_seconds=0, duration_seconds=6, purpose="show the real Studio",
+        narration="The Studio exposes a governed timeline.", visual_direction="Use the supplied Studio screenshot.",
+        evidence_refs=["README.md"], spatial_layout=layout,
+    )
+    prompt = scene_generation_prompt(scene, brief, aspect_ratio="9:16")
+    assert "Spatial contract" in prompt
+    assert "region_studio: authentic_reference, preserve" in prompt
+    assert "source asset asset_studio_capture" in prompt
+    with pytest.raises(ValueError, match="source asset"):
+        StoryboardRegion(
+            id="region_invalid", purpose="authentic_reference", x=0, y=0, width=1, height=1,
+        )
+
+
+def test_prompt_studio_resolves_the_exact_generation_bundle_revision():
+    brief = CreativeBrief(
+        title="Demo", logline="Factual demo", audience_promise="Understand it", tone="precise",
+        visual_language="authentic Studio", narrative_arc=["hook", "proof", "cta"],
+        omni_prompt="Preserve the real Studio capture.", veo_prompt="Use controlled camera motion.",
+        music_prompt="restrained pulse", narration_guidance="calm and direct", evidence_revision="evidence-1",
+    )
+    storyboard = RepoStoryboard(
+        title="Demo", hook="See the proof", call_to_action="Inspect the repository", evidence_revision="evidence-1",
+        scenes=[StoryboardScene(
+            id="scene_proof", start_seconds=0, duration_seconds=6, purpose="show proof",
+            narration="The engine verifies generated media.", visual_direction="Show the authentic Studio.",
+            evidence_refs=["README.md"], generation_model="gemini-omni-flash-preview",
+        )],
+    )
+    preview = prompt_studio_preview(PromptStudioPreviewRequest(
+        creative_instruction="Build a factual repository tutorial.", creative_brief=brief,
+        storyboard=storyboard, aspect_ratio="9:16", active_scene_id="scene_proof",
+    ))
+    modules = {module["id"]: module for module in preview["modules"]}
+    assert preview["resolved_prompt_revision"] == resolved_generation_prompt_revision(
+        storyboard, brief, aspect_ratio="9:16",
+    )
+    assert "Spatial" not in modules["generation.resolved_scene"]["content"]
+    assert modules["generation.resolved_scene"]["dispatch"] == "derived_provider_input"
+    assert modules["generation.narration_script"]["content"] == "The engine verifies generated media."
+    assert "Current TTS dispatch" in modules["planning.narration_guidance"]["warnings"][0]
+
+    changed = brief.model_copy(update={"omni_prompt": "A different continuity direction."})
+    changed_preview = prompt_studio_preview(PromptStudioPreviewRequest(
+        creative_brief=changed, storyboard=storyboard, aspect_ratio="9:16",
+    ))
+    assert changed_preview["resolved_prompt_revision"] != preview["resolved_prompt_revision"]
 
 
 def test_storyboard_requires_evidence_refs_and_fits_requested_duration():
@@ -246,3 +338,12 @@ def test_generation_persists_partial_dispatch_and_retry_is_idempotent(tmp_path, 
         assert second.status_code == 202
         assert second.json()["idempotent"] is True
         assert provider.video_calls == 1
+        changed_body = {
+            **body,
+            "creative_brief": {**body["creative_brief"], "omni_prompt": "a changed clean UI direction"},
+        }
+        third = client.post(f"/api/projects/{project.id}/repo-to-video/generate", headers=headers, json=changed_body)
+        assert third.status_code == 202
+        assert third.json()["receipt"]["id"] != first.json()["receipt"]["id"]
+        assert third.json()["receipt"]["payload"]["resolved_prompt_revision"] != first.json()["receipt"]["payload"]["resolved_prompt_revision"]
+        assert provider.video_calls == 2

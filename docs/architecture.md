@@ -22,6 +22,27 @@ Every mutation supplies an expected revision and request ID. A stale actor
 cannot overwrite a newer GUI or terminal edit, and a retried request cannot
 apply twice.
 
+## Unified context shell
+
+The target product model is a connected production environment, not a main page
+with unrelated feature pages. Workspace, project, sequence, focused entity,
+active operation, revision, and authority form the navigation state. Edit,
+Context, System, Director, Prompting Studio, Storyboard, Queue, Governance, and
+Review are projections of that state. Switching projections must preserve
+selection and causal context unless the user explicitly changes them.
+
+On mobile, the focused projection occupies the full viewport and secondary
+modules become internal rails or context drawers. This is not a reduced mobile
+mode: receipts, evidence, prompt revisions, spatial bindings, and verification
+remain reachable. A persistent header or route may provide entry and deep-link
+identity, but no screen becomes an independent source of project truth.
+
+The backend service boundaries remain explicit: evidence, planning, generation,
+media intake, observation, canonical timeline commands, rendering, and delivery
+can run and scale independently. The unified shell composes their typed
+contracts and receipts. It does not reproduce their state as browser-owned
+micro-frontends or bypass service authority.
+
 ## SAG Spatial Runtime
 
 Spatial awareness is an application-owned semantic projection, not pixel
@@ -86,6 +107,78 @@ browser can pause agent-driven view changes while keeping read-only context
 available. A directive is not reported as visible until the browser returns a
 matching projection hash, exact observed target IDs, active depth, renderer
 mode, and bounded findings.
+
+### Perceptual binding plane
+
+NLKE-SAG spatial computer use adds a versioned, frame-local binding plane over
+that semantic runtime. It does not replace the authority boundary above. The
+Studio declares its current viewport as bounded metadata: viewport dimensions,
+an engine-computed adaptive grid, normalized rectangles, stable entity IDs,
+eligible actions, confidence, source, redaction state, and the canonical
+revision and projection hash to which the declaration belongs. Raw screenshots
+and unrestricted model output are not admitted to this contract or retained in
+runtime events.
+
+```text
+declare canonical state
+        -> bind visible regions
+        -> resolve semantic target
+        -> authorize and route action
+        -> observe the resulting frame
+        -> reconcile effect and receipt
+        -> use verified state as the next declaration
+```
+
+This is the recursive SAG loop made explicit. A `SpatialFrame` is evidence
+about one projection at one moment, not project state. Its adaptive cell labels
+are meaningful only inside that frame. Normalized geometry makes declarations
+portable across portrait, landscape, zoom, and device-pixel ratios; stable IDs
+make them mechanically resolvable back to the canonical graph.
+
+DOM geometry and the accessibility tree are the primary observer in Studio.
+Canvas/manual bindings may supplement them. A Gemini observer is an opt-in
+fallback and may emit bindings only for explicitly redacted input; the engine
+still rejects unknown entity IDs and ineligible actions. Coordinate fallback is
+separately opt-in, requires high confidence, and is prohibited for sensitive
+approval, release, publication, credential, provider, and destructive actions.
+The current Studio actuator implements semantic handlers only.
+
+Before and after frames deliberately have separate projection hashes. Creating
+a governed directive receipt changes the System projection even when the
+canonical editing revision does not change. Effect validation therefore binds
+the before frame to the requested hash, validates the after frame as a fresh
+current declaration at the same canonical revision, and records changed
+entities, cells, interaction route, and both frame IDs on the observation
+receipt.
+
+Storyboard scenes use the same vocabulary through an optional spatial layout:
+an adaptive grid plus normalized regions for authentic references, readable
+text, safe motion, caption-safe areas, calls to action, and protected areas.
+The contract travels into the generation prompt so repository screenshots and
+deterministic text can be preserved rather than guessed by a video model. See
+[`workflows/nlke-sag-spatial-computer-use.md`](workflows/nlke-sag-spatial-computer-use.md)
+for the evolving protocol and implementation ledger.
+
+### Versioned instruction plane
+
+Prompting Studio is the instruction-side companion to the perceptual binding
+plane. It projects existing Director inputs, creative-brief prompts, storyboard
+scenes, model capabilities, and exact provider prompt compilation into one GUI.
+Editable modules remain proposals. Read-only resolved modules show the exact
+scene, negative, music, and narration inputs that the engine will dispatch.
+
+The engine hashes the complete resolved provider bundle, including aspect ratio,
+model routing, every scene prompt, Veo exclusions, music, and narration. That
+`resolved_prompt_revision` is included in generation receipts and generation
+idempotency. A changed prompt therefore cannot accidentally reuse an operation
+created for an older instruction bundle.
+
+Prompt previews are request/response only. Their text is not emitted to runtime
+telemetry. Local GUI draft history helps comparison but grants no authority;
+the generation receipt is the durable binding. Storyboard consent, canonical
+edit commands, media observation, release approval, and publication retain
+their existing gates. See
+[`workflows/prompting-studio.md`](workflows/prompting-studio.md).
 
 ## X1 semantic graph adapter (draft)
 

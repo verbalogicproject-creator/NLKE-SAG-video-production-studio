@@ -27,6 +27,11 @@ The Director panel preserves the evidence, brief, storyboard, approval, and
 queue state across Edit, Context, and System. A proposal is never treated as a
 completed asset, and provider completion is never treated as verification.
 
+Implementation proceeds through the approved dogfood gates in
+[`dogfood-pause-gates.md`](dogfood-pause-gates.md). The current implementation
+must pause for connected-control-surface dogfood before the production-packet
+and paid scene-laboratory slices proceed.
+
 ## Planning contract: Codex and Omni
 
 Codex collects a bounded repository snapshot and redacts recognizable secret
