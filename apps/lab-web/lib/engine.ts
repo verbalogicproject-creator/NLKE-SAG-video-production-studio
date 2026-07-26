@@ -292,7 +292,7 @@ export const sagEngine = {
     engineFetch<{ brief: CreativeBrief; receipt: EngineReceipt }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/director/brief`, {
       method: 'POST', body: JSON.stringify(request),
     }),
-  commitRepoToVideoStoryboard: (workspaceId: string, projectId: string, request: { receipt_id: string; expected_revision: number; confirmation_id: string }) =>
+  commitRepoToVideoStoryboard: (workspaceId: string, projectId: string, request: { receipt_id: string; expected_revision: number; confirmation_id: string; storyboard: Storyboard }) =>
     engineFetch<{ receipt: EngineReceipt; idempotent?: boolean }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/storyboard/commit`, {
       method: 'POST', body: JSON.stringify(request), headers: { 'x-sag-human-confirmation': request.confirmation_id },
     }),

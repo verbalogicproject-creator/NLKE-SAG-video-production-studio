@@ -625,6 +625,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request_id=request_id, actor=getattr(http_request.state, "actor", "browser"), project_revision=project.revision,
             payload={"provider": "google", "model": "gemini-omni-flash-preview", "evidence_revision": storyboard.evidence_revision,
                      "scene_count": len(storyboard.scenes), "duration_seconds": sum(scene.duration_seconds for scene in storyboard.scenes),
+                     "requested_duration_seconds": body.duration_seconds,
+                     "allowed_evidence_refs": sorted({"README.md", *evidence.files, *evidence.manifests.keys()}),
                      "repository": {"url": evidence.repository_url, "ref": evidence.ref, "name": evidence.name},
                      "storyboard": storyboard.model_dump(mode="json")},
         )
@@ -680,7 +682,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise StaleRevisionError(body.expected_revision, project.revision)
         if receipt.status != ReceiptStatus.AWAITING_USER_CONSENT:
             return {"receipt": receipt.model_dump(mode="json"), "idempotent": True}
-        updated = store.update_receipt(receipt, ReceiptStatus.COMMITTED, {"human_confirmation_id": body.confirmation_id, "approved_by": getattr(http_request.state, "actor", "browser")})
+        reviewed_storyboard = body.storyboard
+        if reviewed_storyboard is not None:
+            if reviewed_storyboard.evidence_revision != receipt.payload.get("evidence_revision"):
+                raise HTTPException(409, "reviewed storyboard evidence revision differs from the proposal")
+            requested_duration = float(receipt.payload.get("requested_duration_seconds") or 0)
+            reviewed_end = max(
+                (scene.start_seconds + scene.duration_seconds for scene in reviewed_storyboard.scenes), default=0,
+            )
+            if requested_duration and reviewed_end > requested_duration + 0.01:
+                raise HTTPException(409, "reviewed storyboard exceeds the proposed production duration")
+            allowed_refs = set(receipt.payload.get("allowed_evidence_refs") or [])
+            if allowed_refs:
+                invalid_refs = sorted({
+                    reference
+                    for scene in reviewed_storyboard.scenes
+                    for reference in scene.evidence_refs
+                    if reference.split("#", 1)[0].split(":", 1)[0].strip() not in allowed_refs
+                })
+                if invalid_refs:
+                    raise HTTPException(409, "reviewed storyboard contains evidence references outside the proposal")
+        approved_storyboard = reviewed_storyboard.model_dump(mode="json") if reviewed_storyboard is not None else receipt.payload.get("storyboard")
+        updated = store.update_receipt(receipt, ReceiptStatus.COMMITTED, {
+            "human_confirmation_id": body.confirmation_id,
+            "approved_by": getattr(http_request.state, "actor", "browser"),
+            "storyboard": approved_storyboard,
+            "approved_storyboard_revision": proposal_revision(reviewed_storyboard) if reviewed_storyboard is not None else None,
+        })
         _emit_receipt_transition(updated)
         return {"receipt": updated.model_dump(mode="json"), "next_step": "enqueue_scene_generation_and_observation"}
 

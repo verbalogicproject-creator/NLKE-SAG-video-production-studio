@@ -51,6 +51,7 @@ class StoryboardCommitRequest(BaseModel):
     receipt_id: str = Field(min_length=8, max_length=120)
     expected_revision: int = Field(ge=1)
     confirmation_id: str = Field(min_length=8, max_length=120)
+    storyboard: "RepoStoryboard | None" = None
 
 
 class RepoVideoGenerationRequest(BaseModel):
@@ -354,4 +355,5 @@ def parse_storyboard(
     return storyboard
 
 
+StoryboardCommitRequest.model_rebuild()
 RepoVideoGenerationRequest.model_rebuild()

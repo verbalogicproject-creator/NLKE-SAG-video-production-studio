@@ -191,7 +191,7 @@ export function DirectorPanel({
       const confirmation_id = crypto.randomUUID();
       await post('storyboard/commit', {
         sequence_id: sequenceId, receipt_id: session.storyboardReceipt.id,
-        expected_revision: projectRevision, confirmation_id,
+        expected_revision: projectRevision, confirmation_id, storyboard: session.storyboard,
       }, true);
       setSession((current) => ({
         ...current, storyboardApproved: true,

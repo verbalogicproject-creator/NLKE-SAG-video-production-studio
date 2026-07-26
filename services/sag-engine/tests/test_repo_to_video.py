@@ -128,11 +128,25 @@ def test_trusted_web_proxy_requires_exact_human_confirmation(tmp_path):
     receipt = app.state.store.create_receipt(
         project_id=project.id, command="media.propose_storyboard", status=ReceiptStatus.AWAITING_USER_CONSENT,
         request_id="storyboard_confirmation_test", actor="browser", project_revision=project.revision,
-        payload={"evidence_revision": "evidence-1"},
+        payload={
+            "evidence_revision": "evidence-1", "allowed_evidence_refs": ["README.md"],
+            "requested_duration_seconds": 60,
+        },
     )
     service_headers = {"x-sag-service-token": "trusted-web", "x-sag-workspace-id": "workspace-1"}
     confirmation_id = "human-confirmation-1234"
-    body = {"receipt_id": receipt.id, "expected_revision": project.revision, "confirmation_id": confirmation_id}
+    reviewed_storyboard = {
+        "title": "Demo", "hook": "Hook", "call_to_action": "Act", "evidence_revision": "evidence-1",
+        "scenes": [{
+            "id": "scene_one", "start_seconds": 0, "duration_seconds": 5, "purpose": "proof",
+            "narration": "Reviewed proof", "visual_direction": "Static terminal", "evidence_refs": ["README.md"],
+            "generation_model": "gemini-omni-flash-preview",
+        }],
+    }
+    body = {
+        "receipt_id": receipt.id, "expected_revision": project.revision,
+        "confirmation_id": confirmation_id, "storyboard": reviewed_storyboard,
+    }
     with TestClient(app) as client:
         denied = client.post(f"/api/projects/{project.id}/repo-to-video/storyboard/commit", headers=service_headers, json=body)
         assert denied.status_code == 403
@@ -141,14 +155,7 @@ def test_trusted_web_proxy_requires_exact_human_confirmation(tmp_path):
             headers={**service_headers, "x-sag-human-confirmation": confirmation_id},
             json={
                 "storyboard_receipt_id": receipt.id,
-                "storyboard": {
-                    "title": "Demo", "hook": "Hook", "call_to_action": "Act", "evidence_revision": "evidence-1",
-                    "scenes": [{
-                        "id": "scene_one", "start_seconds": 0, "duration_seconds": 5, "purpose": "proof",
-                        "narration": "Proof", "visual_direction": "Static terminal", "evidence_refs": ["README.md"],
-                        "generation_model": "gemini-omni-flash-preview",
-                    }],
-                },
+                "storyboard": reviewed_storyboard,
                 "creative_brief": {
                     "title": "Demo", "logline": "Proof", "audience_promise": "Learn", "tone": "precise",
                     "visual_language": "clean", "narrative_arc": ["hook", "proof", "cta"],
@@ -166,6 +173,7 @@ def test_trusted_web_proxy_requires_exact_human_confirmation(tmp_path):
         )
         assert accepted.status_code == 200
         assert accepted.json()["receipt"]["status"] == "committed"
+        assert accepted.json()["receipt"]["payload"]["storyboard"]["scenes"][0]["narration"] == "Reviewed proof"
         events = client.get(f"/api/projects/{project.id}/runtime/events?cursor=0", headers=service_headers)
         assert events.status_code == 200
         assert any(
