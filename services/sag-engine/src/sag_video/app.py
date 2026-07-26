@@ -779,6 +779,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         _emit_receipt_transition(receipt)
         operations: list[dict[str, Any]] = []
+
+        def _stored_operations() -> list[dict[str, Any]]:
+            return [
+                {
+                    "kind": item["kind"],
+                    "scene_id": item.get("scene_id"),
+                    "operation_name": item["operation_name"],
+                    "model": item["model"],
+                    "state": item.get("state", "pending"),
+                    **({"asset_id": item["asset_id"]} if item.get("asset_id") else {}),
+                }
+                for item in operations
+            ]
+
+        def _register_started(kind: str, operation: ProviderOperation, scene_id: str | None = None) -> None:
+            nonlocal receipt
+            item: dict[str, Any] = {
+                "kind": kind,
+                "scene_id": scene_id,
+                "request_id": operation.request_id,
+                "provider": operation.provider,
+                "model": operation.model,
+                "operation_name": operation.operation_name,
+                "state": operation.state,
+            }
+            operations.append(item)
+            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {"operations": _stored_operations()})
+            if operation.state == "failed":
+                raise RuntimeError(operation.error_detail or "provider operation failed during dispatch")
+            if operation.state != "completed":
+                return
+            if not operation.output:
+                raise ValueError("provider completed during dispatch without materializable media")
+            imported = materialize(
+                media, project_id, operation.output,
+                request_id=f"{receipt.id}_{kind}_{scene_id or 'all'}",
+                actor=getattr(http_request.state, "actor", "browser"),
+            )
+            if imported.asset is None or imported.receipt.status != ReceiptStatus.OBSERVED_SUCCESS:
+                raise ValueError("provider media failed canonical observation during dispatch")
+            item["asset_id"] = imported.asset.id
+            current = store.get_project(project_id)
+            insert_receipt = commands.execute(
+                project_id,
+                CommandRequest(
+                    command="timeline.insert_asset", arguments={"asset_id": imported.asset.id},
+                    expected_revision=current.revision, request_id=f"{receipt.id}_insert_{imported.asset.id}",
+                    actor=getattr(http_request.state, "actor", "browser"),
+                ),
+                scopes=_scopes(http_request),
+            )
+            if insert_receipt.status != ReceiptStatus.COMMITTED:
+                raise ValueError("observed provider asset could not be inserted on the canonical timeline")
+            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {"operations": _stored_operations()})
+
         try:
             for scene in body.storyboard.scenes:
                 model = scene.generation_model if scene.generation_model in {"gemini-omni-flash-preview", "veo-3.1-generate-preview", "veo-3.1-lite-generate-preview"} else "gemini-omni-flash-preview"
@@ -790,40 +845,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     aspect_ratio=body.aspect_ratio,
                     negative_prompt="" if model == "gemini-omni-flash-preview" else scene_negative_prompt(aspect_ratio=body.aspect_ratio),
                 ))
-                operations.append({"kind": "video", "scene_id": scene.id, **operation.model_dump(mode="json")})
-                receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {
-                    "operations": [
-                        {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
-                        for item in operations
-                    ],
-                })
+                _register_started("video", operation, scene.id)
             music = generative.start_audio(GenerativeAudioRequest(model="lyria-3-clip-preview", text=body.creative_brief.music_prompt, duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 30)))
-            operations.append({"kind": "music", **music.model_dump(mode="json")})
-            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {
-                "operations": [
-                    {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
-                    for item in operations
-                ],
-            })
+            _register_started("music", music)
             narration = generative.start_audio(GenerativeAudioRequest(model="gemini-3.1-flash-tts-preview", text=" ".join(scene.narration for scene in body.storyboard.scenes), duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 600)))
-            operations.append({"kind": "narration", **narration.model_dump(mode="json")})
-            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {
+            _register_started("narration", narration)
+            final_status = (
+                ReceiptStatus.OBSERVED_SUCCESS
+                if operations and all(item.get("asset_id") for item in operations)
+                else ReceiptStatus.ACCEPTED
+            )
+            receipt = store.update_receipt(receipt, final_status, {
                 "dispatch_state": "completed",
-                "operations": [
-                    {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
-                    for item in operations
-                ],
+                "operations": _stored_operations(),
             })
-        except (RuntimeError, ValueError) as error:
+            if final_status == ReceiptStatus.OBSERVED_SUCCESS:
+                _emit_receipt_transition(receipt)
+        except (OSError, RuntimeError, ValueError, httpx.HTTPError) as error:
             detail = str(error)
             receipt = store.update_receipt(receipt, ReceiptStatus.EXECUTION_FAILED, {
                 "dispatch_state": "failed",
                 "dispatch_error_code": "quota_failure" if detail.startswith("quota_failure:") else "provider_dispatch_failed",
                 "dispatch_error_detail": detail[:500],
-                "operations": [
-                    {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
-                    for item in operations
-                ],
+                "operations": _stored_operations(),
             })
             _emit_receipt_transition(receipt)
             return {"receipt": receipt.model_dump(mode="json"), "operations": operations, "partial": bool(operations)}
@@ -843,14 +887,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         failed = receipt.payload.get("dispatch_state") == "failed"
         all_done = True
         for item in receipt.payload.get("operations", []):
-            operation = ProviderOperation(request_id=receipt.id, model=str(item["model"]), operation_name=str(item["operation_name"]))
+            asset_id = item.get("asset_id")
+            operation = ProviderOperation(
+                request_id=receipt.id, model=str(item["model"]), operation_name=str(item["operation_name"]),
+                state="completed" if asset_id else "pending",
+            )
+            if asset_id:
+                results.append({"kind": item["kind"], "scene_id": item.get("scene_id"), "asset_id": asset_id, **operation.model_dump(mode="json")})
+                continue
             try:
                 observed = generative.poll(operation)
             except RuntimeError as error:
                 observed = operation.model_copy(update={"state": "failed", "error_code": "provider_poll_failed", "error_detail": str(error)})
             failed = failed or observed.state == "failed"
             all_done = all_done and observed.state in {"completed", "failed"}
-            asset_id = item.get("asset_id")
             if observed.state == "completed" and not asset_id:
                 if not observed.output:
                     failed = True

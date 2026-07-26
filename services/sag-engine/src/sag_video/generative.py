@@ -82,8 +82,8 @@ class ProviderOperation(BaseModel):
 class GoogleProviderClient(Protocol):
     """Small protocol allowing deterministic adapter tests without Google."""
 
-    def start_video(self, *, model: str, request: GenerativeVideoRequest) -> str: ...
-    def start_audio(self, *, model: str, request: GenerativeAudioRequest) -> str: ...
+    def start_video(self, *, model: str, request: GenerativeVideoRequest) -> str | dict[str, Any]: ...
+    def start_audio(self, *, model: str, request: GenerativeAudioRequest) -> str | dict[str, Any]: ...
     def poll(self, *, operation_name: str) -> dict[str, Any]: ...
     def plan_text(self, *, model: str, prompt: str, response_schema: dict[str, Any] | None = None) -> str: ...
 
@@ -195,14 +195,30 @@ class GoogleGenerativeAdapter:
 
     def start_video(self, request: GenerativeVideoRequest) -> ProviderOperation:
         validate_model_for(request.model, "video_generation")
-        operation_name = self._call("start_video", model=request.model, request=request)
-        return ProviderOperation(request_id=f"gen_{request_hash(request)[:24]}", model=request.model, operation_name=operation_name)
+        started = self._call("start_video", model=request.model, request=request)
+        return self._started_operation(request, started)
 
     def start_audio(self, request: GenerativeAudioRequest) -> ProviderOperation:
         capability = "music_generation" if request.model.startswith("lyria-") else "text_to_speech"
         validate_model_for(request.model, capability)
-        operation_name = self._call("start_audio", model=request.model, request=request)
-        return ProviderOperation(request_id=f"gen_{request_hash(request)[:24]}", model=request.model, operation_name=operation_name)
+        started = self._call("start_audio", model=request.model, request=request)
+        return self._started_operation(request, started)
+
+    @staticmethod
+    def _started_operation(request: BaseModel, started: str | dict[str, Any]) -> ProviderOperation:
+        if isinstance(started, str):
+            payload: dict[str, Any] = {"operation_name": started, "state": "pending"}
+        elif isinstance(started, dict):
+            payload = started
+        else:
+            raise RuntimeError("provider returned an invalid operation start result")
+        return ProviderOperation(
+            request_id=f"gen_{request_hash(request)[:24]}",
+            model=str(getattr(request, "model")),
+            operation_name=str(payload.get("operation_name") or ""),
+            state=str(payload.get("state") or "pending"),
+            output=payload.get("output"),
+        )
 
     def poll(self, operation: ProviderOperation) -> ProviderOperation:
         result = self._call("poll", operation_name=operation.operation_name)
@@ -220,7 +236,7 @@ class _SdkClient:
     def __init__(self, client: Any):
         self.client = client
 
-    def start_video(self, *, model: str, request: GenerativeVideoRequest) -> str:
+    def start_video(self, *, model: str, request: GenerativeVideoRequest) -> str | dict[str, Any]:
         if model == "gemini-omni-flash-preview":
             create_interaction = getattr(getattr(self.client, "interactions", None), "create", None)
             if create_interaction is None:
@@ -244,7 +260,12 @@ class _SdkClient:
             identifier = getattr(interaction, "id", None) or getattr(interaction, "name", None)
             if not identifier:
                 raise RuntimeError("Gemini Omni did not return an interaction ID")
-            return f"interactions/{identifier}"
+            status = str(getattr(interaction, "status", "pending")).lower()
+            return {
+                "operation_name": f"interactions/{identifier}",
+                "state": "failed" if status in {"failed", "error"} else ("completed" if status in {"completed", "succeeded", "done"} else "running"),
+                "output": _media_output(interaction),
+            }
         generate = getattr(getattr(self.client, "models", None), "generate_videos", None)
         if generate is None:
             raise RuntimeError("installed google-genai SDK does not expose video generation")
@@ -257,15 +278,26 @@ class _SdkClient:
             raise RuntimeError("Google video generation did not return an operation name")
         return str(name)
 
-    def start_audio(self, *, model: str, request: GenerativeAudioRequest) -> str:
+    def start_audio(self, *, model: str, request: GenerativeAudioRequest) -> str | dict[str, Any]:
         create = getattr(getattr(self.client, "interactions", None), "create", None)
         if create is None:
             raise RuntimeError("installed google-genai SDK does not expose Interactions API")
-        interaction = create(model=model, input=request.text)
+        arguments: dict[str, Any] = {"model": model, "input": request.text}
+        if not model.startswith("lyria-"):
+            arguments.update({
+                "response_format": {"type": "audio"},
+                "generation_config": {"speech_config": [{"voice": request.voice_name or "Kore"}]},
+            })
+        interaction = create(**arguments)
         name = getattr(interaction, "id", None) or getattr(interaction, "name", None)
         if not name:
             raise RuntimeError("Google audio generation did not return an operation ID")
-        return f"interactions/{str(name).removeprefix('interactions/')}"
+        status = str(getattr(interaction, "status", "pending")).lower()
+        return {
+            "operation_name": f"interactions/{str(name).removeprefix('interactions/')}",
+            "state": "failed" if status in {"failed", "error"} else ("completed" if status in {"completed", "succeeded", "done"} else "running"),
+            "output": _media_output(interaction),
+        }
 
     def poll(self, *, operation_name: str) -> dict[str, Any]:
         if operation_name.startswith("interactions/"):
@@ -387,13 +419,23 @@ def _media_output(value: Any) -> dict[str, Any] | None:
     if hasattr(value, "model_dump"):
         value = value.model_dump(exclude_none=True)
     if isinstance(value, dict):
+        media_type = str(value.get("type") or "").lower()
+        direct_data = value.get("data")
+        if media_type in {"audio", "video", "image"} and direct_data:
+            return {
+                "data_base64": base64.b64encode(direct_data).decode() if isinstance(direct_data, bytes) else str(direct_data),
+                "mime_type": str(value.get("mime_type") or value.get("mimeType") or ""),
+            }
         inline = value.get("inline_data") or value.get("inlineData")
         if inline is not None:
             if hasattr(inline, "model_dump"):
                 inline = inline.model_dump(exclude_none=True)
             if isinstance(inline, dict) and inline.get("data"):
                 data = inline["data"]
-                return {"data_base64": base64.b64encode(data).decode() if isinstance(data, bytes) else str(data)}
+                return {
+                    "data_base64": base64.b64encode(data).decode() if isinstance(data, bytes) else str(data),
+                    "mime_type": str(inline.get("mime_type") or inline.get("mimeType") or value.get("mime_type") or ""),
+                }
         for key in ("uri", "video_uri", "audio_uri", "file_uri"):
             if value.get(key):
                 return {"uri": str(value[key])}

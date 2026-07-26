@@ -24,6 +24,22 @@ def test_omni_video_is_real_operation_not_fake_completion():
     assert adapter.poll(operation).state == "completed"
 
 
+def test_completed_inline_operation_is_returned_without_losing_media():
+    class InlineClient(FakeClient):
+        def start_video(self, *, model, request):
+            return {
+                "operation_name": "interactions/video-inline",
+                "state": "completed",
+                "output": {"data_base64": "bWVkaWE=", "mime_type": "video/mp4"},
+            }
+
+    operation = GoogleGenerativeAdapter(client=InlineClient()).start_video(
+        GenerativeVideoRequest(prompt="a quiet studio", model="gemini-omni-flash-preview")
+    )
+    assert operation.state == "completed"
+    assert operation.output == {"data_base64": "bWVkaWE=", "mime_type": "video/mp4"}
+
+
 def test_missing_credentials_fail_closed():
     with pytest.raises(RuntimeError, match="not configured"):
         GoogleGenerativeAdapter(api_key="", backend="developer").start_video(GenerativeVideoRequest(prompt="test"))
@@ -61,10 +77,12 @@ def test_sdk_client_uses_preview_interaction_shapes(monkeypatch):
     models = SdkValue(generate_videos=lambda **_kwargs: SdkValue(name="operations/video-1"))
     client = _SdkClient(SdkValue(interactions=interactions, operations=operations, models=models))
     assert client.plan_text(model="gemini-omni-flash-preview", prompt="test") == "READY"
-    assert client.start_audio(model="lyria-3-clip-preview", request=GenerativeAudioRequest(model="lyria-3-clip-preview", text="music")) == "interactions/interaction-1"
+    audio_start = client.start_audio(model="lyria-3-clip-preview", request=GenerativeAudioRequest(model="lyria-3-clip-preview", text="music"))
+    assert audio_start["operation_name"] == "interactions/interaction-1"
     assert client.start_video(model="veo-3.1-lite-generate-preview", request=GenerativeVideoRequest(prompt="video")) == "operations/video-1"
     assert client.poll(operation_name="operations/video-1")["output"] == {"uri": "https://media.example/video.mp4"}
-    client.start_video(model="gemini-omni-flash-preview", request=GenerativeVideoRequest(prompt="video", aspect_ratio="9:16"))
+    omni_start = client.start_video(model="gemini-omni-flash-preview", request=GenerativeVideoRequest(prompt="video", aspect_ratio="9:16"))
+    assert omni_start["operation_name"] == "interactions/interaction-1"
     assert interaction_calls[-1]["response_format"] == {"type": "video", "aspect_ratio": "9:16", "duration": "8s"}
     assert interaction_calls[-1]["generation_config"] == {"video_config": {"task": "text_to_video"}}
 
@@ -110,7 +128,10 @@ def test_structured_output_schema_inlines_pydantic_definitions():
 
 
 def test_media_output_normalizes_inline_bytes():
-    assert _media_output({"candidate": {"inline_data": {"data": b"media"}}}) == {"data_base64": "bWVkaWE="}
+    assert _media_output({"candidate": {"inline_data": {"data": b"media"}}}) == {"data_base64": "bWVkaWE=", "mime_type": ""}
+    assert _media_output({"type": "audio", "mime_type": "audio/mpeg", "data": "bWVkaWE="}) == {
+        "data_base64": "bWVkaWE=", "mime_type": "audio/mpeg",
+    }
 
 
 def test_text_output_uses_model_step_not_user_or_thought_text():
