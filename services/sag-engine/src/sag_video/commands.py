@@ -254,6 +254,16 @@ class CommandService:
             locked=left.locked or right.locked,
         )
 
+    @staticmethod
+    def _recalculate_duration(project: Project) -> None:
+        project.duration_ticks = max(
+            1,
+            max(
+                (item.start_ticks + item.duration_ticks for track in project.tracks for item in track.items),
+                default=1,
+            ),
+        )
+
     def _insert_asset(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
         asset_id = str(self._required(arguments, "asset_id"))
         try:
@@ -332,7 +342,7 @@ class CommandService:
                     if candidate.id != item.id and candidate.start_ticks >= old_end:
                         candidate.start_ticks = max(0, candidate.start_ticks + delta)
                 track.items.sort(key=lambda entry: (entry.start_ticks, entry.id))
-            project.duration_ticks = max(project.duration_ticks, start + item.duration_ticks)
+            self._recalculate_duration(project)
         if "x" in arguments:
             item.x = int(arguments["x"])
         if "y" in arguments:
@@ -386,7 +396,7 @@ class CommandService:
                 if candidate.id != item.id and candidate.start_ticks >= old_end:
                     candidate.start_ticks = max(0, candidate.start_ticks + delta)
             track.items.sort(key=lambda entry: (entry.start_ticks, entry.id))
-        project.duration_ticks = max(project.duration_ticks, start + duration)
+        self._recalculate_duration(project)
         return {"item_id": item.id, "start_ticks": start, "duration_ticks": duration, "source_in_ticks": source_in, "source_out_ticks": source_out}
 
     def _split_clip(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -430,6 +440,7 @@ class CommandService:
             for candidate in track.items:
                 if candidate.start_ticks >= end:
                     candidate.start_ticks = max(item.start_ticks, candidate.start_ticks - item.duration_ticks)
+        self._recalculate_duration(project)
         return {"deleted_item_id": item.id, "track_id": track.id, "ripple": bool(arguments.get("ripple", False))}
 
     def _set_clip_transform(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
