@@ -745,6 +745,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "requested storyboard differs from the human-approved proposal")
         if body.storyboard.evidence_revision != body.creative_brief.evidence_revision:
             raise HTTPException(409, "creative brief and storyboard evidence revisions differ")
+        storyboard_revision = proposal_revision(body.storyboard)
+        brief_revision = proposal_revision(body.creative_brief)
+        request_id = f"repo_video_{storyboard_revision[:18]}_{body.aspect_ratio.replace(':', '_')}"
+        existing = store.receipt_for_request(project_id, request_id)
+        if existing is not None:
+            existing_operations = [
+                {
+                    "request_id": existing.id,
+                    "provider": "google",
+                    "state": "pending",
+                    **item,
+                }
+                for item in existing.payload.get("operations", [])
+            ]
+            return {"receipt": existing.model_dump(mode="json"), "operations": existing_operations, "idempotent": True}
+
+        receipt = store.create_receipt(
+            project_id=project_id, command="media.repo_to_video_generation", status=ReceiptStatus.ACCEPTED,
+            request_id=request_id, actor=getattr(http_request.state, "actor", "browser"), project_revision=project.revision,
+            payload={
+                "confirmation_id": body.confirmation_id,
+                "evidence_revision": body.storyboard.evidence_revision,
+                "storyboard_revision": storyboard_revision,
+                "creative_brief_revision": brief_revision,
+                "aspect_ratio": body.aspect_ratio,
+                "dispatch_state": "running",
+                "operations": [],
+            },
+        )
+        _emit_receipt_transition(receipt)
         operations: list[dict[str, Any]] = []
         try:
             for scene in body.storyboard.scenes:
@@ -758,21 +788,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     negative_prompt="" if model == "gemini-omni-flash-preview" else scene_negative_prompt(aspect_ratio=body.aspect_ratio),
                 ))
                 operations.append({"kind": "video", "scene_id": scene.id, **operation.model_dump(mode="json")})
+                receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {
+                    "operations": [
+                        {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
+                        for item in operations
+                    ],
+                })
             music = generative.start_audio(GenerativeAudioRequest(model="lyria-3-clip-preview", text=body.creative_brief.music_prompt, duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 30)))
             operations.append({"kind": "music", **music.model_dump(mode="json")})
+            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {
+                "operations": [
+                    {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
+                    for item in operations
+                ],
+            })
             narration = generative.start_audio(GenerativeAudioRequest(model="gemini-3.1-flash-tts-preview", text=" ".join(scene.narration for scene in body.storyboard.scenes), duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 600)))
             operations.append({"kind": "narration", **narration.model_dump(mode="json")})
+            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {
+                "dispatch_state": "completed",
+                "operations": [
+                    {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
+                    for item in operations
+                ],
+            })
         except (RuntimeError, ValueError) as error:
-            raise HTTPException(422, f"generation could not start: {error}") from error
-        request_id = f"repo_video_{body.storyboard.evidence_revision[:24]}"
-        receipt = store.create_receipt(
-            project_id=project_id, command="media.repo_to_video_generation", status=ReceiptStatus.ACCEPTED,
-            request_id=request_id, actor=getattr(http_request.state, "actor", "browser"), project_revision=project.revision,
-            payload={"confirmation_id": body.confirmation_id, "evidence_revision": body.storyboard.evidence_revision,
-                     "aspect_ratio": body.aspect_ratio,
-                     "operations": [{"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]} for item in operations]},
-        )
-        _emit_receipt_transition(receipt)
+            detail = str(error)
+            receipt = store.update_receipt(receipt, ReceiptStatus.EXECUTION_FAILED, {
+                "dispatch_state": "failed",
+                "dispatch_error_code": "quota_failure" if detail.startswith("quota_failure:") else "provider_dispatch_failed",
+                "dispatch_error_detail": detail[:500],
+                "operations": [
+                    {"kind": item["kind"], "scene_id": item.get("scene_id"), "operation_name": item["operation_name"], "model": item["model"]}
+                    for item in operations
+                ],
+            })
+            _emit_receipt_transition(receipt)
+            return {"receipt": receipt.model_dump(mode="json"), "operations": operations, "partial": bool(operations)}
         return {"receipt": receipt.model_dump(mode="json"), "operations": operations}
 
     @application.get("/api/projects/{project_id}/repo-to-video/generation/{receipt_id}")
@@ -786,7 +837,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "repo-to-video generation receipt not found")
         initial_status = receipt.status
         results: list[dict[str, Any]] = []
-        failed = False
+        failed = receipt.payload.get("dispatch_state") == "failed"
         all_done = True
         for item in receipt.payload.get("operations", []):
             operation = ProviderOperation(request_id=receipt.id, model=str(item["model"]), operation_name=str(item["operation_name"]))

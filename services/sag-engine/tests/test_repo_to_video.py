@@ -1,7 +1,9 @@
 import pytest
 from fastapi.testclient import TestClient
 
+import sag_video.app as app_module
 from sag_video.app import Settings, create_app
+from sag_video.generative import ProviderOperation
 from sag_video.models import ReceiptStatus
 from sag_video.repo_to_video import (
     CreativeBrief,
@@ -182,3 +184,65 @@ def test_trusted_web_proxy_requires_exact_human_confirmation(tmp_path):
             and event["payload"]["status"] == "committed"
             for event in events.json()["events"]
         )
+
+
+def test_generation_persists_partial_dispatch_and_retry_is_idempotent(tmp_path, monkeypatch):
+    class PartialProvider:
+        video_calls = 0
+
+        def start_video(self, request):
+            self.video_calls += 1
+            return ProviderOperation(
+                request_id="gen_video", model=request.model, operation_name="interactions/video-one",
+            )
+
+        def start_audio(self, request):
+            raise RuntimeError("provider_failure: audio model unavailable")
+
+    provider = PartialProvider()
+    monkeypatch.setattr(app_module, "GoogleGenerativeAdapter", lambda: provider)
+    app = create_app(Settings(
+        database_path=str(tmp_path / "sag.db"), artifact_dir=str(tmp_path / "artifacts"),
+        media_dir=str(tmp_path / "media"), proxy_dir=str(tmp_path / "proxy"),
+        service_token="trusted-web", start_analysis_worker=False, start_render_worker=False,
+    ))
+    project = app.state.store.create_project("Dispatch test", "landscape_1080p", "workspace-1")
+    storyboard = {
+        "title": "Demo", "hook": "Hook", "call_to_action": "Act", "evidence_revision": "evidence-1",
+        "scenes": [{
+            "id": "scene_one", "start_seconds": 0, "duration_seconds": 5, "purpose": "proof",
+            "narration": "Reviewed proof", "visual_direction": "Static terminal", "evidence_refs": ["README.md"],
+            "generation_model": "gemini-omni-flash-preview",
+        }],
+    }
+    receipt = app.state.store.create_receipt(
+        project_id=project.id, command="media.propose_storyboard", status=ReceiptStatus.COMMITTED,
+        request_id="approved_storyboard", actor="browser", project_revision=project.revision,
+        payload={"evidence_revision": "evidence-1", "storyboard": storyboard},
+    )
+    confirmation_id = "human-confirmation-1234"
+    body = {
+        "storyboard_receipt_id": receipt.id, "storyboard": storyboard,
+        "creative_brief": {
+            "title": "Demo", "logline": "Proof", "audience_promise": "Learn", "tone": "precise",
+            "visual_language": "clean", "narrative_arc": ["hook", "proof", "cta"],
+            "omni_prompt": "clean UI", "veo_prompt": "clean UI", "music_prompt": "pulse",
+            "narration_guidance": "clear", "evidence_revision": "evidence-1",
+        },
+        "expected_revision": project.revision, "confirmation_id": confirmation_id, "aspect_ratio": "9:16",
+    }
+    headers = {
+        "x-sag-service-token": "trusted-web", "x-sag-workspace-id": "workspace-1",
+        "x-sag-human-confirmation": confirmation_id,
+    }
+    with TestClient(app) as client:
+        first = client.post(f"/api/projects/{project.id}/repo-to-video/generate", headers=headers, json=body)
+        assert first.status_code == 202
+        assert first.json()["receipt"]["status"] == "execution_failed"
+        assert first.json()["receipt"]["payload"]["dispatch_state"] == "failed"
+        assert first.json()["receipt"]["payload"]["operations"][0]["operation_name"] == "interactions/video-one"
+        assert first.json()["partial"] is True
+        second = client.post(f"/api/projects/{project.id}/repo-to-video/generate", headers=headers, json=body)
+        assert second.status_code == 202
+        assert second.json()["idempotent"] is True
+        assert provider.video_calls == 1
