@@ -27,6 +27,64 @@ test('hydrates the live timecode from a deterministic server snapshot', async ({
   expect(hydrationErrors).toEqual([]);
 });
 
+test('renames the project and sequence through the revisioned Studio command', async ({ page }) => {
+  let renameRequest: Record<string, unknown> | null = null;
+  await page.route('**/api/projects/*/studio', async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    if (body.operation !== 'rename') return route.continue();
+    renameRequest = body;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ result: { status: 'committed' } }) });
+  });
+  await page.goto(studioPath());
+  await page.getByRole('button', { name: 'Rename project and sequence' }).click();
+  await page.getByLabel('Project name').fill('SAG Repository Proof');
+  await page.getByLabel('Sequence name').fill('SAG Repository Short 9x16');
+  await page.getByRole('button', { name: 'Save names' }).click();
+  await expect(page.getByRole('button', { name: 'Rename project and sequence' })).toContainText('SAG Repository Proof');
+  expect(renameRequest).toMatchObject({
+    operation: 'rename', sequenceId, name: 'SAG Repository Proof', sequenceName: 'SAG Repository Short 9x16',
+  });
+  expect(typeof (renameRequest as Record<string, unknown> | null)?.expectedRevision).toBe('number');
+});
+
+test('shows runtime state and unlocks both verified downloads from an observed render', async ({ page }) => {
+  await page.addInitScript(() => {
+    class FakeEventSource extends EventTarget {
+      static instance: FakeEventSource | null = null;
+      onopen: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(public url: string) {
+        super(); FakeEventSource.instance = this; queueMicrotask(() => this.onopen?.());
+      }
+      close() {}
+    }
+    Object.assign(window, { EventSource: FakeEventSource, __sagEventSource: FakeEventSource });
+  });
+  await page.route('**/api/projects/*/studio?*', async (route) => {
+    const upstream = await route.fetch();
+    const body = await upstream.json();
+    body.receipts = [{
+      id: 'receipt-verified-e2e', project_id: 'engine-e2e', command: 'render.verified',
+      status: 'observed_success', actor: 'studio:e2e', project_revision: 12,
+      created_at: '2026-07-27T08:00:00Z',
+      payload: { artifact_id: 'artifact-verified-e2e', artifact_sha256: 'a'.repeat(64), qc_report: { passed: true } },
+    }, ...(Array.isArray(body.receipts) ? body.receipts : body.receipts?.receipts ?? [])];
+    await route.fulfill({ response: upstream, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  await page.goto(studioPath());
+  await expect(page.getByRole('status')).toContainText('Runtime connected');
+  await page.evaluate(() => {
+    const source = (window as unknown as { __sagEventSource: { instance: EventTarget } }).__sagEventSource;
+    source.instance.dispatchEvent(new MessageEvent('receipt.transitioned', { data: '{}' }));
+  });
+  await expect(page.getByText('Verified revision 12')).toBeVisible();
+  const video = page.getByRole('link', { name: 'Video' }).first();
+  const receipt = page.getByRole('link', { name: 'Receipt' }).first();
+  await expect(video).toHaveAttribute('href', new RegExp('/artifacts/artifact-verified-e2e/content\\?sequence_id='));
+  await expect(receipt).toHaveAttribute('href', new RegExp('/receipts/receipt-verified-e2e/download\\?sequence_id='));
+});
+
 test('records a camera preview and imports the capture through managed media intake', async ({ page }) => {
   await page.addInitScript(() => {
     class MockMediaRecorder {
@@ -53,11 +111,12 @@ test('records a camera preview and imports the capture through managed media int
     if (navigator.storage) Object.defineProperty(navigator.storage, 'getDirectory', { configurable: true, value: undefined });
   });
   let imports = 0;
-  await page.route('**/api/projects/*/assets/upload', async (route) => {
+  await page.route('**/api/projects/*/assets/upload?*', async (route) => {
     imports += 1;
     await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ asset: { id: 'capture-e2e' } }) });
   });
   await page.goto(studioPath());
+  await page.getByRole('button', { name: 'Edit stage' }).click();
   if ((page.viewportSize()?.width ?? 1000) < 768) await page.getByRole('button', { name: 'Media', exact: true }).click();
   await page.getByRole('button', { name: 'Capture', exact: true }).click();
   await page.getByLabel('Capture source').selectOption('camera');
@@ -126,7 +185,7 @@ test('pause control and responsive targets remain operable', async ({ page }) =>
 
 test('declares an adaptive semantic frame and exposes an accessible spatial map', async ({ page }) => {
   const declaration = page.waitForRequest((request) => (
-    request.method() === 'POST' && request.url().endsWith('/studio/spatial/frames')
+    request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/studio/spatial/frames')
   ));
   await page.goto(studioPath());
   const request = await declaration;
@@ -253,7 +312,7 @@ test('deduplicates directives and acknowledges the exact observed target', async
   expect(target).toBeTruthy();
 });
 
-test('Director remains available and preserves direction across Studio depths', async ({ page }) => {
+test('Director production state survives global depth projections and reload', async ({ page }) => {
   await page.goto(studioPath());
   await page.getByRole('button', { name: 'Director' }).click();
   const director = page.getByLabel('Director workspace');
@@ -261,12 +320,29 @@ test('Director remains available and preserves direction across Studio depths', 
   const repository = director.getByLabel('Repository URL');
   await repository.fill('https://github.com/openai/sag-video');
   await page.getByRole('button', { name: 'Context' }).click();
-  await expect(director).toBeVisible();
-  await expect(repository).toHaveValue('https://github.com/openai/sag-video');
+  await expect(page.getByLabel('context spatial workspace')).toBeVisible();
   await page.getByRole('button', { name: 'System' }).click();
-  await expect(director).toBeVisible();
-  await page.reload();
+  await expect(page.getByLabel('system spatial workspace')).toBeVisible();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(page.getByLabel('Director workspace').getByLabel('Repository URL')).toHaveValue('https://github.com/openai/sag-video');
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.getByLabel('Director workspace').getByLabel('Repository URL')).toHaveValue('https://github.com/openai/sag-video');
+  await assertNoHorizontalDrift(page);
+});
+
+test('six-stage production rail persists the active stage', async ({ page }) => {
+  await page.goto(studioPath());
+  const rail = page.getByRole('navigation', { name: 'Production stages' });
+  for (const stage of ['Director', 'Scenes', 'Edit', 'Finish', 'Review', 'Deliver']) {
+    const button = rail.getByRole('button', { name: `${stage} stage` });
+    await expect(button).toBeVisible();
+    if ((page.viewportSize()?.width ?? 1000) < 768) expect((await button.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+  }
+  await rail.getByRole('button', { name: 'Review stage' }).click();
+  await expect(page.getByLabel('Review stage')).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Review stage')).toBeVisible();
   await assertNoHorizontalDrift(page);
 });
 

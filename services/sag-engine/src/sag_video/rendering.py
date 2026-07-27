@@ -7,13 +7,14 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
 from .models import CaptionStyle, ObservationContract, Project, Receipt, ReceiptStatus, TICKS_PER_SECOND
 from .repository import ArtifactRecord, JobRecord
+from .production_intelligence import QCCheck, QCReport
 from .store import Store
 from .blob_storage import BlobStorage, FilesystemBlobStorage, StorageLocator
 
@@ -26,7 +27,7 @@ class RenderMediaSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
     item_id: str
     asset_id: str
-    kind: Literal["video", "audio"]
+    kind: Literal["video", "audio", "image"]
     asset_sha256: str
     has_audio: bool
     start_seconds: float
@@ -154,11 +155,12 @@ def _write_ass(path: Path, captions: tuple[RenderCaptionSpec, ...], width: int, 
     for index, caption in enumerate(captions):
         style = CaptionStyle.model_validate(caption.style)
         alignment = {"top": 8, "middle": 5, "bottom": 2}[style.position]
-        bold = -1 if style.preset == "bold_pop" else 0
+        bold = -1 if style.preset in {"bold_pop", "glow_pulse"} else 0
         outline = 5 if style.preset == "bold_pop" else 3
+        shadow = 4 if style.preset == "glow_pulse" else 1
         lines.append(
             f"Style: Caption{index},{style.font_family},{style.font_size},{_ass_color(style.text_color)},"
-            f"{_ass_color(style.highlight_color)},&_H00000000,{_ass_color(style.background_color)},{bold},0,0,0,100,100,0,0,1,{outline},1,{alignment},70,70,110,1".replace("&_H", "&H")
+            f"{_ass_color(style.highlight_color)},&_H00000000,{_ass_color(style.background_color)},{bold},0,0,0,100,100,0,0,1,{outline},{shadow},{alignment},70,70,110,1".replace("&_H", "&H")
         )
     lines.extend(["", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"])
     for index, caption in enumerate(captions):
@@ -170,10 +172,27 @@ def _write_ass(path: Path, captions: tuple[RenderCaptionSpec, ...], width: int, 
                 continue
             start = int(cue[0]["start_ticks"]) / TICKS_PER_SECOND
             end = int(cue[-1]["end_ticks"]) / TICKS_PER_SECOND
-            text = " ".join(
-                f"{{\\kf{max(1,round((int(word['end_ticks'])-int(word['start_ticks']))/TICKS_PER_SECOND*100))}}}{_ass_escape(str(word['text']))}"
-                for word in cue
-            )
+            if style.preset == "typewriter_reveal":
+                for word_index, word in enumerate(cue):
+                    word_start = int(word["start_ticks"]) / TICKS_PER_SECOND
+                    word_end = (
+                        int(cue[word_index + 1]["start_ticks"]) / TICKS_PER_SECOND
+                        if word_index + 1 < len(cue) else end
+                    )
+                    text = _ass_escape(" ".join(str(entry["text"]) for entry in cue[:word_index + 1]))
+                    lines.append(
+                        f"Dialogue: 0,{_ass_time(word_start)},{_ass_time(word_end)},Caption{index},,0,0,0,,{text}"
+                    )
+                continue
+            if style.preset in {"karaoke", "bold_pop"}:
+                text = " ".join(
+                    f"{{\\kf{max(1,round((int(word['end_ticks'])-int(word['start_ticks']))/TICKS_PER_SECOND*100))}}}{_ass_escape(str(word['text']))}"
+                    for word in cue
+                )
+            else:
+                text = _ass_escape(" ".join(str(word["text"]) for word in cue))
+            if style.preset == "glow_pulse":
+                text = r"{\blur3\t(0,250,\fscx108\fscy108)\t(250,500,\fscx100\fscy100)}" + text
             lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Caption{index},,0,0,0,,{text}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -217,7 +236,7 @@ class RenderService:
         captions: list[RenderCaptionSpec] = []
         for track in project.tracks:
             for item in track.items:
-                if item.kind in {"video", "audio"}:
+                if item.kind in {"video", "audio", "image"}:
                     if not item.asset_id:
                         raise RenderValidationError(f"timeline item {item.id} has no asset")
                     try:
@@ -230,8 +249,10 @@ class RenderService:
                         raise RenderValidationError(f"video item {item.id} does not reference video media")
                     if item.kind == "audio" and asset.kind != "audio":
                         raise RenderValidationError(f"audio item {item.id} does not reference audio media")
+                    if item.kind == "image" and asset.kind != "image":
+                        raise RenderValidationError(f"image item {item.id} does not reference image media")
                     source_out = item.source_in_ticks + item.duration_ticks
-                    if asset.duration_ticks and source_out > asset.duration_ticks:
+                    if item.kind != "image" and asset.duration_ticks and source_out > asset.duration_ticks:
                         raise RenderValidationError(f"item {item.id} exceeds the observed asset duration")
                     path = self.media_resolver(project, asset.id)
                     if not path.is_file() or _sha256(path) != asset.sha256:
@@ -262,8 +283,8 @@ class RenderService:
                         words=tuple(entry.model_dump(mode="json") for entry in item.caption_words),
                         style=(item.caption_style or CaptionStyle()).model_dump(mode="json"),
                     ))
-        if not any(entry.kind == "video" for entry in media):
-            raise RenderValidationError("the timeline needs at least one observed-valid video item")
+        if not any(entry.kind in {"video", "image"} for entry in media):
+            raise RenderValidationError("the timeline needs at least one observed-valid visual item")
         if project.duration_ticks / TICKS_PER_SECOND > 600:
             raise RenderValidationError("phone renders are limited to ten minutes")
         return RenderSpecification(
@@ -275,6 +296,62 @@ class RenderService:
             media=tuple(media), titles=tuple(titles), captions=tuple(captions),
         )
 
+    def _persist_qc_report(
+        self, *, spec: RenderSpecification, artifact: ArtifactRecord, observation: Any,
+    ) -> QCReport:
+        result = observation.model_dump(mode="json")
+        findings = {entry["code"]: entry for entry in result.get("findings", [])}
+
+        def check(code: str, finding_code: str, detail: str, *, default: bool = False) -> QCCheck:
+            finding = findings.get(finding_code)
+            return QCCheck(
+                code=code, passed=bool(finding["passed"]) if finding else default,
+                observed=(finding or {}).get("evidence"), detail=(finding or {}).get("summary", detail),
+            )
+
+        has_audio = any(item.has_audio for item in spec.media)
+        checks = [
+            check("dimensions", "video_stream_contract", "Canvas dimensions were not observed"),
+            check("duration", "duration_contract", "Duration was not observed"),
+            check("frame_rate", "frame_rate_contract", "Frame rate was not observed"),
+            check("representative_decode", "representative_frame_readable", "Representative decoding failed"),
+            QCCheck(
+                code="scene_coverage", passed=bool(spec.media),
+                observed={"rendered_media_items": len(spec.media)}, expected={"minimum": 1},
+                detail="Every frozen media item passed source validation before encoding",
+            ),
+            check("caption_readability", "caption_pixels_present", "Captions were not required", default=not bool(spec.captions)),
+            QCCheck(
+                code="caption_timing", passed=all(
+                    all(int(word["end_ticks"]) > int(word["start_ticks"]) for word in caption.words)
+                    for caption in spec.captions
+                ),
+                observed={"caption_tracks": len(spec.captions)},
+                detail="Word timing is ordered and positive in the frozen render specification",
+            ),
+            check("safe_areas", "title_safe_area", "No title safe-area check required", default=not bool(spec.titles)),
+            check("audio_presence", "audio_stream_contract", "Audio stream presence was not observed"),
+            check("integrated_loudness", "integrated_loudness", "Integrated loudness was not required", default=not has_audio),
+            check("true_peak", "true_peak", "True peak was not required", default=not has_audio),
+            check("sha256", "artifact_hash_contract", "Artifact hash was not observed"),
+        ]
+        report = QCReport(
+            id=f"qc_{artifact.id}", project_id=spec.project_id,
+            project_revision=spec.project_revision, artifact_id=artifact.id,
+            passed=all(entry.passed for entry in checks), checks=checks,
+            artifact_sha256=artifact.sha256,
+        )
+        project = self.store.get_project(spec.project_id)
+        try:
+            self.store.put_editorial_record(
+                record_id=report.id, kind="qc_report", body=report.model_dump(mode="json"),
+                expected_revision=0, project_id=spec.project_id,
+                workspace_id=project.workspace_id or project.id, append_only=True,
+            )
+        except ValueError:
+            return QCReport.model_validate(self.store.get_editorial_record(report.id, kind="qc_report"))
+        return report
+
     def enqueue(self, spec: RenderSpecification, receipt: Receipt, job_id: str) -> JobRecord:
         return self.store.create_job(JobRecord(
             id=job_id, project_id=spec.project_id, project_revision=spec.project_revision,
@@ -285,6 +362,11 @@ class RenderService:
     def _command(self, spec: RenderSpecification, project: Project, output: Path, work: Path) -> list[str]:
         command = ["ffmpeg", "-nostdin", "-y", "-v", "error"]
         for item in spec.media:
+            if item.kind == "image":
+                command.extend([
+                    "-loop", "1", "-framerate", f"{spec.fps:.6f}",
+                    "-t", f"{item.duration_seconds:.6f}",
+                ])
             command.extend(["-i", str(self.media_resolver(project, item.asset_id))])
         filters: list[str] = [
             f"color=c=0x111315:s={spec.width}x{spec.height}:r={spec.fps:.6f}:d={spec.duration_seconds:.6f}[base0]"
@@ -293,7 +375,7 @@ class RenderService:
         audio_labels: list[str] = []
         for index, item in enumerate(spec.media):
             end = item.source_in_seconds + item.duration_seconds
-            if item.kind == "video":
+            if item.kind in {"video", "image"}:
                 scaled_w = max(2, round(spec.width * item.scale / 2) * 2)
                 scaled_h = max(2, round(spec.height * item.scale / 2) * 2)
                 if item.crop_keyframes:
@@ -314,8 +396,10 @@ class RenderService:
                 else:
                     sizing = f"scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=decrease,pad={scaled_w}:{scaled_h}:(ow-iw)/2:(oh-ih)/2:color=black"
                 rotation = "" if abs(item.rotation) < .001 else f",rotate={item.rotation:.6f}*PI/180:fillcolor=black@0"
+                trim_start = 0.0 if item.kind == "image" else item.source_in_seconds
+                trim_end = item.duration_seconds if item.kind == "image" else end
                 filters.append(
-                    f"[{index}:v:0]trim=start={item.source_in_seconds:.6f}:end={end:.6f},"
+                    f"[{index}:v:0]trim=start={trim_start:.6f}:end={trim_end:.6f},"
                     f"setpts=PTS-STARTPTS+{item.start_seconds:.6f}/TB,{sizing},setsar=1{rotation},"
                     f"format=rgba,colorchannelmixer=aa={item.opacity:.6f}[v{index}]"
                 )
@@ -430,6 +514,7 @@ class RenderService:
             width=spec.width, height=spec.height, duration_seconds=spec.duration_seconds,
             fps=spec.fps, title_id=title.item_id if title else None,
             title_active_seconds=(title.start_seconds + .2) if title else None,
+            title_bounds=(title.x, title.y, title.width, title.height) if title else None,
             safe_margin_x=round(spec.width * .05), safe_margin_y=round(spec.height * .05),
             marker_rgb=_rgb(title.color) if title else None,
             expect_audio=any(item.has_audio for item in spec.media),
@@ -461,8 +546,12 @@ class RenderService:
             observation = self.observer(contract)
             payload = observation.model_dump(mode="json")
             payload["observer_deployment"] = os.getenv("SAG_VIDEO_OBSERVER_MODE", "in_process_development")
-            terminal = ReceiptStatus.OBSERVED_SUCCESS if observation.passed else ReceiptStatus.OBSERVED_FAILURE
-            self.store.update_receipt(receipt, terminal, {"observation": payload})
+            qc_report = self._persist_qc_report(spec=spec, artifact=artifact, observation=observation)
+            terminal = ReceiptStatus.OBSERVED_SUCCESS if observation.passed and qc_report.passed else ReceiptStatus.OBSERVED_FAILURE
+            self.store.update_receipt(receipt, terminal, {
+                "observation": payload, "qc_report_id": qc_report.id,
+                "qc_report": qc_report.model_dump(mode="json"),
+            })
             self.store.update_job(job.id, state=terminal.value, progress=1, result_artifact_id=artifact.id)
         except Exception as error:
             self.store.update_receipt(receipt, ReceiptStatus.OBSERVED_FAILURE, {

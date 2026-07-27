@@ -18,6 +18,11 @@ steps:
   - name: hashicorp/terraform:1.9
     entrypoint: sh
     args: [-c, 'terraform -chdir=deploy/terraform fmt -check && terraform -chdir=deploy/terraform init -backend=false && terraform -chdir=deploy/terraform validate']
+  - name: anchore/syft:v1.29.0
+    args: ['dir:/workspace', '-o', 'cyclonedx-json=/workspace/artifacts/sag-video.cdx.json']
+  - name: python:3.12-slim
+    entrypoint: python
+    args: ['-c', 'import json; p="/workspace/artifacts/sag-video.cdx.json"; b=json.load(open(p)); assert b["bomFormat"] == "CycloneDX" and b["components"]']
   - name: gcr.io/cloud-builders/docker
     args: [build, -f, deploy/Dockerfile.engine, -t, '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/engine:$COMMIT_SHA', .]
   - name: gcr.io/cloud-builders/docker

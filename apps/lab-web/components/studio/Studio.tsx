@@ -2,16 +2,17 @@
 
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
-import { Component, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bot, Box, Camera, Captions, ChevronDown, CirclePlay, EyeOff, Film, Image as ImageIcon,
-  Layers3, Link2, LoaderCircle, Mic2, MonitorPlay, MoreHorizontal, Pause, Play, Plus,
+  Download, FileJson, Layers3, Link2, LoaderCircle, Mic2, MonitorPlay, MoreHorizontal, Pause, Pencil, Play, Plus,
   Redo2, Scissors, Search, Settings2, SlidersHorizontal, Split, Square, Trash2,
   ShieldCheck, Undo2, Upload, Volume2, WandSparkles, Wifi, WifiOff, X,
 } from 'lucide-react';
 import { CaptureSpool, CompletedCapture, createCaptureSpool, recoverCaptureSpools } from './capture-spool';
 import { DirectorPanel } from './DirectorPanel';
 import { SpatialAwarenessOverlay, useSpatialAwareness } from './SpatialAwareness';
+import type { IntakeStage, ProductionSession, ProductionStage, ScreenshotCaptureRecord, WorkflowMode } from '@/lib/engine';
 
 const SpatialCanvas = dynamic(() => import('./SpatialCanvas'), { ssr: false });
 
@@ -40,6 +41,7 @@ type Receipt = {
 };
 type MobilePane = 'media' | 'monitor' | 'timeline' | 'inspector';
 type StudioDepth = 'edit' | 'context' | 'system';
+type RuntimeConnection = 'connecting' | 'connected' | 'reconnecting' | 'offline';
 type SpatialEntity = {
   id: string; kind: string; label: string; parent_id?: string | null; semantic_layer: string;
   revision: number; state: Record<string, any>; metadata: Record<string, any>;
@@ -60,11 +62,12 @@ function timecode(ticks: number) {
 
 export function Studio({
   controlProject, initialProject, initialContext, initialCatalog, initialReceipts, initialSpatial, initialDelivery,
+  initialProduction,
 }: {
   controlProject: {
     id: string; name: string;
     sequences?: Array<{
-      id?: string;
+      id?: string; name?: string;
       deliveryProfiles?: Array<Record<string, any>>;
       releaseApprovals?: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }>;
     }>;
@@ -75,36 +78,47 @@ export function Studio({
   initialReceipts: Receipt[];
   initialSpatial: SpatialSnapshot;
   initialDelivery: { delivery_profiles: Array<Record<string, any>>; release_approvals: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }> };
+  initialProduction: ProductionSession;
 }) {
   const [project, setProject] = useState(initialProject);
   const [context, setContext] = useState(initialContext);
   const [catalog, setCatalog] = useState(initialCatalog);
   const [receipts, setReceipts] = useState<Receipt[]>(initialReceipts ?? []);
   const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [production, setProduction] = useState(initialProduction);
+  const productionRef = useRef(initialProduction);
+  const productionWrite = useRef<Promise<void>>(Promise.resolve());
+  const sequenceId = controlProject.sequences?.[0]?.id ?? initialProject.id;
+  const initialSequenceName = controlProject.sequences?.[0]?.name ?? `${controlProject.name} master`;
+  const [projectName, setProjectName] = useState(controlProject.name);
+  const [sequenceName, setSequenceName] = useState(initialSequenceName);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [draftProjectName, setDraftProjectName] = useState(controlProject.name);
+  const [draftSequenceName, setDraftSequenceName] = useState(initialSequenceName);
   const [selectedId, setSelectedId] = useState<string | null>(
-    initialContext?.shared_focus?.[0]?.id ?? initialProject.tracks.flatMap((track) => track.items)[0]?.id ?? null,
+    initialProduction.focused_entity_id ?? initialContext?.shared_focus?.[0]?.id ?? initialProject.tracks.flatMap((track) => track.items)[0]?.id ?? null,
   );
   const [mobilePane, setMobilePane] = useState<MobilePane>('monitor');
   const [activityOpen, setActivityOpen] = useState(false);
-  const [directorOpen, setDirectorOpen] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [pairCode, setPairCode] = useState('');
   const [captureOpen, setCaptureOpen] = useState(false);
-  const [depth, setDepth] = useState<StudioDepth>('edit');
+  const [depth, setDepth] = useState<StudioDepth>(initialProduction.active_depth);
   const [spatial, setSpatial] = useState<SpatialSnapshot>(initialSpatial);
   const [delivery, setDelivery] = useState(initialDelivery);
   const [show3d, setShow3d] = useState(false);
   const [spatialPaused, setSpatialPaused] = useState(false);
-  const [runtimeConnection, setRuntimeConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [runtimeConnection, setRuntimeConnection] = useState<RuntimeConnection>('connecting');
   const seenRuntimeEvents = useRef(new Set<string>());
   const [playing, setPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const awareness = useSpatialAwareness({
     projectId: controlProject.id,
+    sequenceId,
     revision: project.revision,
     depth,
-    triggerKey: `${selectedId ?? ''}:${mobilePane}:${directorOpen}:${activityOpen}:${show3d}`,
+    triggerKey: `${production.current_stage}:${selectedId ?? ''}:${mobilePane}:${activityOpen}:${show3d}`,
   });
 
   const items = useMemo(() => project.tracks.flatMap((track) => track.items), [project]);
@@ -116,6 +130,7 @@ export function Studio({
   async function fetchSpatial(nextDepth: StudioDepth = depth, focusId: string | null = selectedId) {
     const query = new URLSearchParams({ depth: nextDepth, hop_count: nextDepth === 'system' ? '6' : '2' });
     if (focusId) query.set('focus_id', focusId);
+    query.set('sequence_id', sequenceId);
     const response = await fetch(`/api/projects/${controlProject.id}/studio/spatial?${query}`, { cache: 'no-store' });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message ?? body.error ?? 'Spatial context failed');
@@ -123,15 +138,61 @@ export function Studio({
     return body as SpatialSnapshot;
   }
 
+  const updateProduction = useCallback(async (patch: Record<string, unknown>) => {
+    setProduction((current) => ({ ...current, ...patch } as ProductionSession));
+    productionWrite.current = productionWrite.current.then(async () => {
+      async function write(expectedRevision: number) {
+        return fetch(`/api/projects/${controlProject.id}/repo-to-video/production`, {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sequence_id: sequenceId, expected_revision: expectedRevision, ...patch }),
+        });
+      }
+      let response = await write(productionRef.current.revision);
+      if (response.status === 409) {
+        const latest = await fetch(
+          `/api/projects/${controlProject.id}/repo-to-video/production?sequence_id=${encodeURIComponent(sequenceId)}`,
+          { cache: 'no-store' },
+        );
+        const latestBody = await latest.json();
+        if (!latest.ok) throw new Error(latestBody.message ?? latestBody.detail ?? 'Production context reload failed');
+        productionRef.current = latestBody.production;
+        response = await write(productionRef.current.revision);
+      }
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message ?? body.detail ?? 'Production context save failed');
+      productionRef.current = body.production;
+      setProduction(body.production);
+    });
+    return productionWrite.current;
+  }, [controlProject.id, sequenceId]);
+
   function changeDepth(nextDepth: StudioDepth) {
     setDepth(nextDepth);
-    window.localStorage.setItem(`sag-studio-depth:${controlProject.id}`, nextDepth);
+    void updateProduction({ active_depth: nextDepth });
     if (nextDepth !== 'edit') void fetchSpatial(nextDepth).catch((cause) => setError(cause instanceof Error ? cause.message : 'Spatial context failed'));
+  }
+
+  function changeStage(nextStage: ProductionStage) {
+    setActivityOpen(false);
+    void updateProduction({ current_stage: nextStage });
+  }
+
+  function changeWorkflowMode(workflowMode: WorkflowMode) {
+    const intakeStage: IntakeStage = workflowMode === 'repo_to_video' ? 'evidence' : 'source';
+    void updateProduction({ workflow_mode: workflowMode, intake_stage: intakeStage, current_stage: 'director' });
+  }
+
+  function changeIntakeStage(intakeStage: IntakeStage) {
+    setActivityOpen(false);
+    void updateProduction({ intake_stage: intakeStage, current_stage: 'director' });
   }
 
   async function refresh(silent = false) {
     if (!silent) setBusy('refresh');
-    const response = await fetch(`/api/projects/${controlProject.id}/studio`, { cache: 'no-store' });
+    const response = await fetch(
+      `/api/projects/${controlProject.id}/studio?sequence_id=${encodeURIComponent(sequenceId)}`,
+      { cache: 'no-store' },
+    );
     const body = await response.json();
     if (!response.ok) throw new Error(body.message ?? body.error ?? 'Studio refresh failed');
     setProject(body.project); setContext(body.context); setCatalog(body.catalog);
@@ -139,20 +200,27 @@ export function Studio({
     setSuggestions(body.suggestions?.suggestions ?? []);
     if (body.spatial && depth !== 'edit') setSpatial(body.spatial);
     if (body.delivery) setDelivery(body.delivery);
+    if (body.production) {
+      productionRef.current = body.production;
+      setProduction(body.production);
+      setDepth(body.production.active_depth);
+    }
+    if (body.controlProject?.name) setProjectName(String(body.controlProject.name));
+    if (body.sequence?.name) setSequenceName(String(body.sequence.name));
     if (!silent) setBusy('');
   }
 
   useEffect(() => {
-    const timer = window.setInterval(() => { void refresh(true).catch(() => undefined); }, 2500);
+    const intervalMs = runtimeConnection === 'connected' ? 15_000 : 2_500;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refresh(true).catch(() => undefined);
+    }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [controlProject.id]);
+  }, [controlProject.id, runtimeConnection]);
 
   useEffect(() => {
-    const savedDepth = window.localStorage.getItem(`sag-studio-depth:${controlProject.id}`);
-    if (savedDepth === 'edit' || savedDepth === 'context' || savedDepth === 'system') setDepth(savedDepth);
     setSpatialPaused(window.localStorage.getItem(`sag-spatial-paused:${controlProject.id}`) === '1');
     setShow3d(window.matchMedia('(min-width: 768px) and (orientation: landscape)').matches);
-    setDirectorOpen(window.localStorage.getItem(`sag-director-open:${controlProject.id}`) === '1');
   }, [controlProject.id]);
 
   useEffect(() => {
@@ -161,9 +229,18 @@ export function Studio({
 
   useEffect(() => {
     const storedCursor = window.sessionStorage.getItem(`sag-runtime-cursor:${controlProject.id}`) ?? '0';
-    const source = new EventSource(`/api/projects/${controlProject.id}/studio/runtime?cursor=${encodeURIComponent(storedCursor)}`);
-    source.onopen = () => setRuntimeConnection('connected');
-    source.onerror = () => setRuntimeConnection('disconnected');
+    const runtimeQuery = new URLSearchParams({ cursor: storedCursor, sequence_id: sequenceId });
+    const source = new EventSource(`/api/projects/${controlProject.id}/studio/runtime?${runtimeQuery}`);
+    let offlineTimer: number | undefined;
+    source.onopen = () => {
+      if (offlineTimer) window.clearTimeout(offlineTimer);
+      setRuntimeConnection('connected');
+    };
+    source.onerror = () => {
+      setRuntimeConnection('reconnecting');
+      if (offlineTimer) window.clearTimeout(offlineTimer);
+      offlineTimer = window.setTimeout(() => setRuntimeConnection('offline'), 10_000);
+    };
 
     function rememberRuntimeCursor(message: MessageEvent<string>) {
       try {
@@ -180,7 +257,7 @@ export function Studio({
       await fetch(`/api/projects/${controlProject.id}/studio/spatial`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          operation: 'ack', receiptId: directive.receipt_id,
+          operation: 'ack', receiptId: directive.receipt_id, sequenceId,
           acknowledgement: {
             consumer_id: `studio:${controlProject.id}`,
             projection_hash: directive.expected_projection_hash,
@@ -217,7 +294,7 @@ export function Studio({
         let beforeFrame = awareness.latestFrameRef.current;
         if (directive.expected_frame_id && beforeFrame?.frame_id !== directive.expected_frame_id) {
           const response = await fetch(
-            `/api/projects/${controlProject.id}/studio/spatial/frames/${encodeURIComponent(directive.expected_frame_id)}`,
+            `/api/projects/${controlProject.id}/studio/spatial/frames/${encodeURIComponent(directive.expected_frame_id)}?sequence_id=${encodeURIComponent(sequenceId)}`,
             { cache: 'no-store' },
           );
           if (!response.ok) throw new Error('Expected spatial frame is unavailable');
@@ -251,15 +328,18 @@ export function Studio({
     source.addEventListener('spatial.effect.observed', rememberRuntimeCursor as EventListener);
     source.addEventListener('snapshot_required', () => { void fetchSpatial(depth).catch(() => undefined); });
     source.addEventListener('receipt.transitioned', () => { void refresh(true).catch(() => undefined); });
-    return () => source.close();
-  }, [controlProject.id, depth, show3d, spatialPaused, awareness.declareFrameNow]);
+    return () => {
+      if (offlineTimer) window.clearTimeout(offlineTimer);
+      source.close();
+    };
+  }, [controlProject.id, sequenceId, depth, show3d, spatialPaused, awareness.declareFrameNow]);
 
   async function operate(operation: string, payload: Record<string, unknown> = {}) {
     setBusy(operation); setError('');
     try {
       const response = await fetch(`/api/projects/${controlProject.id}/studio`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ operation, expectedRevision: project.revision, ...payload }),
+        body: JSON.stringify({ operation, sequenceId, expectedRevision: project.revision, ...payload }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.message ?? body.error ?? body.detail ?? 'Studio operation failed');
@@ -276,13 +356,34 @@ export function Studio({
     return operate('command', { command: name, arguments: arguments_, confirm });
   }
 
+  async function renameProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = draftProjectName.trim();
+    const nextSequenceName = draftSequenceName.trim();
+    if (!name || !nextSequenceName) {
+      setError('Project and sequence names are required.');
+      return;
+    }
+    try {
+      const result = await operate('rename', { name, sequenceName: nextSequenceName });
+      setProjectName(name);
+      setSequenceName(nextSequenceName);
+      setRenameOpen(false);
+      return result;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function select(item: Item) {
     setSelectedId(item.id);
+    void updateProduction({ focused_entity_id: item.id });
     await operate('select', { itemIds: [item.id] });
   }
 
   async function selectSpatial(entityId: string) {
     setSelectedId(entityId);
+    void updateProduction({ focused_entity_id: entityId });
     const item = items.find((entry) => entry.id === entityId);
     if (item) await operate('select', { itemIds: [item.id] });
   }
@@ -295,7 +396,7 @@ export function Studio({
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy('upload'); setError('');
     try {
-      const response = await fetch(`/api/projects/${controlProject.id}/assets/upload`, {
+      const response = await fetch(`/api/projects/${controlProject.id}/assets/upload?sequence_id=${encodeURIComponent(sequenceId)}`, {
         method: 'POST', body: new FormData(event.currentTarget),
       });
       const body = await response.json();
@@ -314,17 +415,39 @@ export function Studio({
   }
 
   const mediaUrl = selectedAsset?.managed_uri
-    ? `/api/projects/${controlProject.id}/studio/assets/${selectedAsset.id}/${selectedAsset.proxy_asset_id ? 'proxy' : 'content'}`
+    ? `/api/projects/${controlProject.id}/studio/assets/${selectedAsset.id}/${selectedAsset.proxy_asset_id ? 'proxy' : 'content'}?sequence_id=${encodeURIComponent(sequenceId)}`
     : null;
+  const renderReceipts = [...receipts]
+    .filter((receipt) => receipt.command === 'render.verified')
+    .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+  const latestRender = renderReceipts[0];
+  const renderInFlight = Boolean(latestRender && ['accepted', 'dispatched', 'rendering', 'artifact_written', 'awaiting_observation'].includes(latestRender.status));
+  const latestVerifiedRender = renderReceipts.find((receipt) => (
+    receipt.status === 'observed_success'
+    && receipt.payload?.artifact_id
+    && receipt.payload?.artifact_sha256
+    && receipt.payload?.qc_report?.passed === true
+  ));
+
+  useEffect(() => {
+    if (!renderInFlight) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refresh(true).catch(() => undefined);
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [renderInFlight, latestRender?.id]);
 
   return <div className="studio-root" ref={awareness.rootRef} data-sag-entity-id="viewport:studio" data-sag-action-ids="spatial.reset_view">
     <header className="studio-header" data-sag-entity-id="viewport:studio-header" data-sag-action-ids="spatial.set_depth">
       <div className="studio-project-identity">
         <Link href="/dashboard" className="studio-mark" aria-label="Back to projects"><Film size={19} /></Link>
-        <div className="min-w-0">
-          <div className="truncate text-[13px] font-medium text-ink-0">{controlProject.name}</div>
-          <div className="font-mono text-[10px] text-ink-2">REV {project.revision} / {project.canvas.width}×{project.canvas.height}</div>
-        </div>
+        <button className="studio-project-name" type="button" onClick={() => {
+          setDraftProjectName(projectName); setDraftSequenceName(sequenceName); setRenameOpen(true);
+        }} aria-label="Rename project and sequence">
+          <span>{projectName}</span>
+          <small>{sequenceName} / REV {project.revision} / {project.canvas.width}×{project.canvas.height}</small>
+          <Pencil size={12} aria-hidden="true" />
+        </button>
       </div>
       <div className="studio-header-actions">
         <div className="studio-depth-switch" role="group" aria-label="Studio depth">
@@ -337,15 +460,35 @@ export function Studio({
           <button className="studio-button secondary" onClick={() => void command('project.undo', {})} disabled={busy !== '' || !eligible.has('project.undo')} aria-label="Undo"><Undo2 size={15} /><span className="hidden sm:inline">Undo</span></button>
           <button className="studio-button secondary hidden md:flex" onClick={() => void command('project.redo', {})} disabled={busy !== '' || !eligible.has('project.redo')}><Redo2 size={15} />Redo</button>
           <button className="studio-button secondary" onClick={() => void pair()} disabled={busy !== ''} aria-label="Pair Codex"><Link2 size={15} /><span className="hidden sm:inline">Pair Codex</span></button>
-          <button className="studio-button director-trigger" aria-pressed={directorOpen} aria-label="Director" onClick={() => {
-            setActivityOpen(false);
-            setDirectorOpen((value) => { window.localStorage.setItem(`sag-director-open:${controlProject.id}`, value ? '0' : '1'); return !value; });
-          }}><WandSparkles size={15} /><span className="hidden sm:inline">Director</span></button>
-          <button className="studio-button primary" onClick={() => void operate('render')} disabled={busy !== ''}><CirclePlay size={15} />Render</button>
-          <button className="studio-icon-button" onClick={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); setActivityOpen((value) => !value); }} aria-label="Open governance"><Activity size={17} /></button>
+          <button className="studio-button director-trigger" aria-pressed={production.current_stage === 'director'} aria-label="Director" onClick={() => changeStage('director')}><WandSparkles size={15} /><span className="hidden sm:inline">Director</span></button>
+          <button className="studio-button primary" onClick={() => void operate('render')} disabled={busy !== '' || renderInFlight}><CirclePlay size={15} />{renderInFlight ? 'Rendering' : 'Render'}</button>
+          <button className="studio-icon-button" onClick={() => setActivityOpen((value) => !value)} aria-label="Open governance"><Activity size={17} /></button>
         </div>
       </div>
     </header>
+
+    <div className="studio-runtime-strip" aria-live="polite">
+      <RuntimeState connection={runtimeConnection} />
+      <span className={`studio-render-state ${latestRender?.status ?? 'idle'}`}>
+        {renderInFlight
+          ? `Render: ${latestRender!.status.replaceAll('_', ' ')}`
+          : latestRender?.status === 'observed_failure' || latestRender?.status === 'execution_failed'
+            ? 'Latest render failed verification'
+            : latestVerifiedRender ? `Verified revision ${latestVerifiedRender.project_revision}` : 'No verified output'}
+      </span>
+      {latestVerifiedRender ? <VerifiedDownloadLinks
+        projectId={controlProject.id} sequenceId={sequenceId} receipt={latestVerifiedRender} compact
+      /> : null}
+    </div>
+
+    {renameOpen ? <form className="studio-name-editor" onSubmit={renameProject} aria-label="Rename project and sequence">
+      <label>Project name<input autoFocus value={draftProjectName} maxLength={120} onChange={(event) => setDraftProjectName(event.target.value)} /></label>
+      <label>Sequence name<input value={draftSequenceName} maxLength={120} onChange={(event) => setDraftSequenceName(event.target.value)} /></label>
+      <div>
+        <button className="studio-button secondary" type="button" onClick={() => setRenameOpen(false)}>Cancel</button>
+        <button className="studio-button primary" type="submit" disabled={busy !== ''}>{busy === 'rename' ? 'Saving' : 'Save names'}</button>
+      </div>
+    </form> : null}
 
     {pairCode ? <div className="studio-notice" role="status">
       <Bot size={17} /><span>Pairing code</span><strong>{pairCode}</strong><span className="text-ink-2">Scoped to this sequence for ten minutes.</span>
@@ -353,13 +496,34 @@ export function Studio({
     </div> : null}
     {error ? <div className="studio-error" role="alert"><span>{error}</span><button onClick={() => setError('')}><X size={15} /></button></div> : null}
 
-    {depth === 'edit' ? <main className="studio-workspace">
+    <nav className="studio-stage-rail" aria-label="Production stages">
+      <div className="studio-workflow-switch" role="group" aria-label="Workflow mode">
+        <button className={production.workflow_mode === 'repo_to_video' ? 'active' : ''} aria-pressed={production.workflow_mode === 'repo_to_video'} onClick={() => changeWorkflowMode('repo_to_video')}>Repository</button>
+        <button className={production.workflow_mode === 'source_to_shorts' ? 'active' : ''} aria-pressed={production.workflow_mode === 'source_to_shorts'} onClick={() => changeWorkflowMode('source_to_shorts')}>Source video</button>
+      </div>
+      {(production.workflow_mode === 'repo_to_video'
+        ? ([['evidence', 'Evidence'], ['brief', 'Brief'], ['storyboard', 'Storyboard'], ['keyframes', 'Keyframes']] as const)
+        : ([['source', 'Source'], ['analysis', 'Analysis'], ['ranked_clips', 'Ranked clips'], ['reframe', 'Reframe']] as const)
+      ).map(([stage, label]) => <button
+        key={stage} className={production.current_stage === 'director' && production.intake_stage === stage ? 'active' : ''}
+        aria-current={production.current_stage === 'director' && production.intake_stage === stage ? 'step' : undefined}
+        onClick={() => changeIntakeStage(stage)}
+      >{label}</button>)}
+      {(['director', 'scenes', 'edit', 'finish', 'review', 'deliver'] as const).map((stage) => <button
+        key={stage} className={production.current_stage === stage ? 'active' : ''}
+        aria-label={`${stage.charAt(0).toUpperCase() + stage.slice(1)} stage`}
+        aria-current={production.current_stage === stage ? 'step' : undefined}
+        onClick={() => changeStage(stage)}
+      >{stage.charAt(0).toUpperCase() + stage.slice(1)}</button>)}
+    </nav>
+
+    {depth === 'edit' && production.current_stage === 'edit' ? <main className="studio-workspace">
       <section className={`studio-panel studio-media ${mobilePane === 'media' ? 'mobile-active' : ''}`} aria-label="Media" data-sag-entity-id="viewport:media" data-sag-action-ids="spatial.frame_entity">
         <PanelHeading icon={<Layers3 size={15} />} title="Media" action={<button className="studio-icon-button compact" aria-label="Search media"><Search size={14} /></button>} />
         <div className="studio-panel-body space-y-3">
           <div className="grid grid-cols-2 gap-2">
             <button className="studio-button secondary" onClick={() => setCaptureOpen((value) => !value)}><Camera size={14} />Capture</button>
-            <button className="studio-button secondary" onClick={() => void operate('render')}><CirclePlay size={14} />Preview</button>
+            <button className="studio-button secondary" disabled={busy !== '' || renderInFlight} onClick={() => void operate('render')}><CirclePlay size={14} />{renderInFlight ? 'Rendering' : 'Preview'}</button>
           </div>
           {project.assets.some((asset) => !asset.parent_asset_id && asset.intake_status === 'observed_valid') ? <button
             className="studio-button primary w-full" disabled={busy !== ''}
@@ -374,7 +538,7 @@ export function Studio({
               <span>{timecode(Number(suggestion.provenance?.start_ticks ?? 0))} / {timecode(Number(suggestion.provenance?.duration_ticks ?? 0))}</span>
             </div>)}
           </div> : null}
-          {captureOpen ? <CaptureControl projectId={controlProject.id} onComplete={() => refresh(true)} /> : null}
+          {captureOpen ? <CaptureControl projectId={controlProject.id} sequenceId={sequenceId} onComplete={() => refresh(true)} /> : null}
           <form onSubmit={upload} className="studio-dropzone">
             <Upload size={19} /><span>Import video or audio</span><input name="file" type="file" accept="video/*,audio/*,image/*" aria-label="Import media" />
           </form>
@@ -388,7 +552,7 @@ export function Studio({
               }}
             >
               <span className="studio-thumb">
-                {asset.thumbnail_asset_id ? <img src={`/api/projects/${controlProject.id}/studio/assets/${asset.id}/thumbnail`} alt="" /> : asset.kind === 'image' ? <ImageIcon size={21} /> : <Film size={21} />}
+                {asset.thumbnail_asset_id ? <img src={`/api/projects/${controlProject.id}/studio/assets/${asset.id}/thumbnail?sequence_id=${encodeURIComponent(sequenceId)}`} alt="" /> : asset.kind === 'image' ? <ImageIcon size={21} /> : <Film size={21} />}
               </span>
               <span className="truncate text-left text-[11px] text-ink-1">{asset.name}</span>
               <span className="font-mono text-[9px] text-ink-3">{asset.duration_ticks ? timecode(asset.duration_ticks) : asset.kind}</span>
@@ -453,7 +617,20 @@ export function Studio({
           </div>)}
         </div>
       </section>
-    </main> : <SpatialWorkspace
+    </main> : depth === 'edit' ? <ProductionStageWorkspace
+      stage={production.current_stage}
+      production={production}
+      project={project}
+      receipts={receipts}
+      delivery={delivery}
+      suggestions={suggestions}
+      projectId={controlProject.id}
+      sequenceId={sequenceId}
+      onProductionUpdate={updateProduction}
+      onProjectRefresh={() => refresh(true)}
+      onOpenEdit={() => changeStage('edit')}
+      onRender={() => operate('render')}
+    /> : <SpatialWorkspace
       snapshot={spatial}
       depth={depth}
       selectedId={selectedId}
@@ -472,7 +649,7 @@ export function Studio({
       onOpenGovernance={() => setActivityOpen(true)}
     />}
 
-    {depth === 'edit' ? <nav className="studio-mobile-nav" aria-label="Studio panes">
+    {depth === 'edit' && production.current_stage === 'edit' ? <nav className="studio-mobile-nav" aria-label="Studio panes">
       {([
         ['media', <Layers3 size={18} />, 'Media'], ['monitor', <MonitorPlay size={18} />, 'Preview'],
         ['timeline', <Film size={18} />, 'Timeline'], ['inspector', <SlidersHorizontal size={18} />, 'Inspector'],
@@ -483,18 +660,255 @@ export function Studio({
       receipts={receipts}
       context={context}
       delivery={delivery}
+      projectId={controlProject.id}
+      sequenceId={sequenceId}
       onClose={() => setActivityOpen(false)}
     /> : null}
-    {directorOpen ? <DirectorPanel
-      projectId={controlProject.id}
-      sequenceId={controlProject.sequences?.[0]?.id ?? project.id}
-      projectRevision={project.revision}
-      onProjectRefresh={() => refresh(true)}
-      onClose={() => { setDirectorOpen(false); window.localStorage.setItem(`sag-director-open:${controlProject.id}`, '0'); }}
-    /> : null}
-    {busy ? <div className="studio-busy" role="status"><LoaderCircle className="animate-spin" size={16} />{busy === 'refresh' ? 'Refreshing' : 'Applying change'}</div> : null}
+    {busy ? <div className="studio-busy" role="status"><LoaderCircle className="animate-spin" size={16} />{
+      busy === 'refresh' ? 'Refreshing Studio'
+        : busy === 'render' ? 'Starting verified render'
+          : busy === 'rename' ? 'Saving project names'
+            : busy === 'upload' ? 'Importing media'
+              : 'Applying change'
+    }</div> : null}
     <SpatialAwarenessOverlay frame={awareness.frame} status={awareness.status} />
   </div>;
+}
+
+function RuntimeState({ connection }: { connection: RuntimeConnection }) {
+  const labels: Record<RuntimeConnection, string> = {
+    connecting: 'Runtime connecting',
+    connected: 'Runtime connected',
+    reconnecting: 'Runtime reconnecting',
+    offline: 'Runtime offline',
+  };
+  return <span className={`studio-runtime-state ${connection}`} role="status">
+    {connection === 'connected' ? <Wifi size={13} /> : connection === 'connecting' ? <LoaderCircle className="animate-spin" size={13} /> : <WifiOff size={13} />}
+    {labels[connection]}
+  </span>;
+}
+
+function VerifiedDownloadLinks({
+  projectId, sequenceId, receipt, compact = false,
+}: {
+  projectId: string; sequenceId: string; receipt: Receipt; compact?: boolean;
+}) {
+  const artifactId = String(receipt.payload?.artifact_id ?? '');
+  const query = `sequence_id=${encodeURIComponent(sequenceId)}`;
+  return <div className={`studio-download-actions ${compact ? 'compact' : ''}`}>
+    <a className="studio-button secondary" href={`/api/projects/${projectId}/studio/artifacts/${encodeURIComponent(artifactId)}/content?${query}`} download>
+      <Download size={14} />Video
+    </a>
+    <a className="studio-button secondary" href={`/api/projects/${projectId}/studio/receipts/${encodeURIComponent(receipt.id)}/download?${query}`} download>
+      <FileJson size={14} />Receipt
+    </a>
+  </div>;
+}
+
+function ProductionStageWorkspace({
+  stage, production, project, receipts, delivery, suggestions, projectId, sequenceId,
+  onProductionUpdate, onProjectRefresh, onOpenEdit, onRender,
+}: {
+  stage: ProductionStage; production: ProductionSession; project: Project; receipts: Receipt[];
+  delivery: { delivery_profiles: Array<Record<string, any>>; release_approvals: Array<Record<string, any>> };
+  suggestions: any[];
+  projectId: string; sequenceId: string;
+  onProductionUpdate: (patch: Record<string, unknown>) => Promise<void>;
+  onProjectRefresh: () => Promise<void>; onOpenEdit: () => void; onRender: () => Promise<unknown>;
+}) {
+  const [screenshotCaptures, setScreenshotCaptures] = useState<ScreenshotCaptureRecord[]>([]);
+  const [screenshotBusy, setScreenshotBusy] = useState('');
+  const [screenshotError, setScreenshotError] = useState('');
+
+  const loadScreenshotCaptures = useCallback(async () => {
+    const response = await fetch(`/api/projects/${projectId}/studio/screenshots?sequence_id=${encodeURIComponent(sequenceId)}`, { cache: 'no-store' });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(String(body.message ?? body.error ?? 'Screenshot review could not be loaded'));
+    setScreenshotCaptures(body.captures ?? []);
+  }, [projectId, sequenceId]);
+
+  useEffect(() => {
+    if (stage !== 'review') return;
+    void loadScreenshotCaptures().catch((cause) => {
+      setScreenshotError(cause instanceof Error ? cause.message : 'Screenshot review could not be loaded');
+    });
+  }, [stage, loadScreenshotCaptures]);
+
+  async function decideScreenshot(captureId: string, decision: 'approved' | 'rejected') {
+    setScreenshotBusy(captureId); setScreenshotError('');
+    try {
+      const response = await fetch(`/api/projects/${projectId}/studio/screenshots/${captureId}/decisions?sequence_id=${encodeURIComponent(sequenceId)}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(body.message ?? body.error ?? 'Screenshot decision failed'));
+      setScreenshotCaptures((current) => current.map((entry) => entry.id === captureId ? body.capture : entry));
+    } catch (cause) {
+      setScreenshotError(cause instanceof Error ? cause.message : 'Screenshot decision failed');
+    } finally {
+      setScreenshotBusy('');
+    }
+  }
+
+  if (stage === 'director' && production.workflow_mode === 'source_to_shorts') return <SourceToShortsStage
+    intakeStage={production.intake_stage} production={production} project={project} suggestions={suggestions}
+    onOpenEdit={onOpenEdit} onProductionUpdate={onProductionUpdate}
+  />;
+
+  if (stage === 'director') return <main className="studio-production-stage stage-director" aria-label="Director stage">
+    <DirectorPanel
+      projectId={projectId} sequenceId={sequenceId} projectRevision={project.revision}
+      production={production} onProductionUpdate={onProductionUpdate}
+      onProjectRefresh={onProjectRefresh} onClose={onOpenEdit}
+    />
+  </main>;
+
+  if (stage === 'scenes') {
+    const storyboard = production.active_storyboard;
+    return <main className="studio-production-stage" aria-label="Scenes stage">
+      <StageHeading title="Scenes" detail="Storyboard units, evidence links, and generation readiness remain bound to one production context." />
+      {storyboard ? <section className="studio-scene-board" aria-label="Storyboard scenes">
+        {storyboard.scenes.map((scene) => {
+          const decision = production.scene_decisions[scene.id];
+          return <article key={scene.id} className="studio-stage-card">
+            <header><code>{scene.id}</code><span>{scene.start_seconds.toFixed(1)}s / {scene.duration_seconds.toFixed(1)}s</span></header>
+            <strong>{scene.purpose}</strong>
+            <p>{scene.visual_direction}</p>
+            <dl><div><dt>Evidence</dt><dd>{scene.evidence_refs.length} links</dd></div><div><dt>Model</dt><dd>{scene.generation_model}</dd></div><div><dt>Decision</dt><dd>{String(decision?.decision ?? 'Not reviewed')}</dd></div></dl>
+          </article>;
+        })}
+      </section> : <StageEmpty title="No approved storyboard" detail="Return to Director to inspect repository evidence and prepare scene units." />}
+    </main>;
+  }
+
+  if (stage === 'finish') {
+    const audioItems = project.tracks.filter((track) => track.kind === 'audio').flatMap((track) => track.items);
+    const captionItems = project.tracks.filter((track) => track.kind === 'caption').flatMap((track) => track.items);
+    const variants = Object.entries(production.variants);
+    return <main className="studio-production-stage" aria-label="Finish stage">
+      <StageHeading title="Finish" detail="Inspect the canonical timeline, audio, captions, and linked platform overlays before review." />
+      <section className="studio-stage-metrics" aria-label="Finishing state">
+        <div><span>Master revision</span><strong>{project.revision}</strong></div>
+        <div><span>Audio items</span><strong>{audioItems.length}</strong></div>
+        <div><span>Caption items</span><strong>{captionItems.length}</strong></div>
+        <div><span>Linked variants</span><strong>{variants.length}</strong></div>
+      </section>
+      {variants.length ? <section className="studio-variant-list">{variants.map(([id, variant]) => <article key={id} className="studio-stage-card"><code>{id}</code><strong>{String(variant.aspect_ratio ?? 'Aspect ratio not set')}</strong><p>{String(variant.status ?? 'Revisioned overlay')}</p></article>)}</section> : <StageEmpty title="No variant overlays" detail="The canonical master remains authoritative. Linked 9:16, 16:9, and 1:1 overlays are configured here." />}
+      <button className="studio-button primary studio-stage-action" onClick={onOpenEdit}><Scissors size={14} />Open canonical edit</button>
+    </main>;
+  }
+
+  if (stage === 'review') {
+    const storyboard = production.active_storyboard;
+    const sceneCount = storyboard?.scenes.length ?? 0;
+    const evidenceBound = storyboard?.scenes.filter((scene) => scene.evidence_refs.length > 0).length ?? 0;
+    const accepted = Object.values(production.scene_decisions).filter((entry) => entry.decision === 'accepted').length;
+    const observedReceipts = receipts.filter((receipt) => receipt.status === 'observed_success').length;
+    const approvedScreenshots = screenshotCaptures.filter((capture) => capture.approval_state === 'approved' && !capture.stale).length;
+    return <main className="studio-production-stage" aria-label="Review stage">
+      <StageHeading title="Review" detail="Final approval stays blocked until evidence, observation, audio, captions, brand, CTA, and safe areas are checked." />
+      <section className="studio-review-checklist" aria-label="Review checklist">
+        <ReviewRow label="Claim to evidence" value={`${evidenceBound}/${sceneCount} scenes`} ready={sceneCount > 0 && evidenceBound === sceneCount} />
+        <ReviewRow label="Scene decisions" value={`${accepted}/${sceneCount} accepted`} ready={sceneCount > 0 && accepted === sceneCount} />
+        <ReviewRow label="Observed operations" value={`${observedReceipts} successful receipts`} ready={observedReceipts > 0} />
+        <ReviewRow label="Authentic screenshots" value={`${approvedScreenshots}/${screenshotCaptures.length} approved`} ready={approvedScreenshots > 0} />
+        <ReviewRow label="Final human approval" value="Not recorded" ready={false} />
+      </section>
+      <section className="studio-screenshot-review" aria-label="Authentic screenshot contact sheet">
+        <header><div><span>Visual proof</span><h2>Screenshot contact sheet</h2></div><button type="button" className="studio-button secondary" onClick={() => void loadScreenshotCaptures()}>Refresh</button></header>
+        {screenshotError ? <div className="studio-error" role="alert"><span>{screenshotError}</span></div> : null}
+        {screenshotCaptures.length ? <div className="studio-screenshot-grid">{screenshotCaptures.map((capture) => <article key={capture.id} className={`studio-screenshot-card ${capture.approval_state}`}>
+          <img src={`/api/projects/${projectId}/studio/assets/${capture.asset_id}/thumbnail?sequence_id=${encodeURIComponent(sequenceId)}`} alt={`SAG checkpoint ${capture.checkpoint_id}`} />
+          <div className="studio-screenshot-card-body">
+            <header><strong>{capture.checkpoint_id}</strong><span>{capture.approval_state}</span></header>
+            <p>{capture.observed_labels.join(' · ')}</p>
+            <dl><div><dt>Source</dt><dd>{capture.adapter}</dd></div><div><dt>Hash</dt><dd>{capture.asset_sha256.slice(0, 12)}</dd></div><div><dt>Revision</dt><dd>{capture.application_revision}</dd></div></dl>
+            {capture.stale ? <span className="studio-screenshot-stale">Stale: revalidate before use</span> : null}
+            <div className="studio-screenshot-actions">
+              <button type="button" className="studio-button secondary" disabled={screenshotBusy === capture.id || capture.approval_state === 'rejected'} onClick={() => void decideScreenshot(capture.id, 'rejected')}>Reject</button>
+              <button type="button" className="studio-button primary" disabled={screenshotBusy === capture.id || capture.stale || capture.approval_state === 'approved'} onClick={() => void decideScreenshot(capture.id, 'approved')}>{screenshotBusy === capture.id ? 'Saving' : 'Approve'}</button>
+            </div>
+          </div>
+        </article>)}</div> : <StageEmpty title="No managed screenshots" detail="Capture authentic SAG checkpoints and bind them to an immutable screenshot recipe." />}
+      </section>
+    </main>;
+  }
+
+  if (stage === 'deliver') {
+    const verifiedRenders = [...receipts]
+      .filter((receipt) => (
+        receipt.command === 'render.verified'
+        && receipt.status === 'observed_success'
+        && receipt.payload?.artifact_id
+        && receipt.payload?.artifact_sha256
+        && receipt.payload?.qc_report?.passed === true
+      ))
+      .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+    const activeRender = receipts.some((receipt) => (
+      receipt.command === 'render.verified'
+      && ['accepted', 'dispatched', 'rendering', 'artifact_written', 'awaiting_observation'].includes(receipt.status)
+    ));
+    return <main className="studio-production-stage" aria-label="Deliver stage">
+    <StageHeading title="Deliver" detail="Create verified downloadable artifacts. Public publication is outside the current milestone." />
+    <section className="studio-stage-metrics" aria-label="Delivery state">
+      <div><span>Profiles</span><strong>{delivery.delivery_profiles.length}</strong></div>
+      <div><span>Approvals</span><strong>{delivery.release_approvals.length}</strong></div>
+      <div><span>Project revision</span><strong>{project.revision}</strong></div>
+      <div><span>Publication</span><strong>Disabled</strong></div>
+    </section>
+    <button className="studio-button primary studio-stage-action" disabled={activeRender} onClick={() => void onRender()}><CirclePlay size={14} />{activeRender ? 'Render in progress' : 'Render verified preview'}</button>
+    <section className="studio-deliverables" aria-label="Verified downloads">
+      <header><div><span>Observed output</span><h2>Verified downloads</h2></div><strong>{verifiedRenders.length}</strong></header>
+      {verifiedRenders.map((receipt) => <article key={receipt.id}>
+        <div><strong>Revision {receipt.project_revision}</strong><span>{new Date(receipt.created_at).toLocaleString()}</span></div>
+        <code>{String(receipt.payload?.artifact_sha256).slice(0, 24)}</code>
+        <VerifiedDownloadLinks projectId={projectId} sequenceId={sequenceId} receipt={receipt} />
+      </article>)}
+      {verifiedRenders.length === 0 ? <StageEmpty title="No verified render" detail="Start a render. Downloads unlock only after independent observation and QC pass." /> : null}
+    </section>
+  </main>;
+  }
+
+  return null;
+}
+
+function SourceToShortsStage({
+  intakeStage, production, project, suggestions, onOpenEdit, onProductionUpdate,
+}: {
+  intakeStage: IntakeStage; production: ProductionSession; project: Project; suggestions: any[];
+  onOpenEdit: () => void; onProductionUpdate: (patch: Record<string, unknown>) => Promise<void>;
+}) {
+  const sourceAssets = project.assets.filter((asset) => asset.kind === 'video');
+  const ranked = [...suggestions].sort((a, b) => Number(b.evidence?.clip_quality_score?.total ?? b.confidence ?? 0) - Number(a.evidence?.clip_quality_score?.total ?? a.confidence ?? 0));
+  if (intakeStage === 'source') return <main className="studio-production-stage" aria-label="Source stage">
+    <StageHeading title="Source" detail="Choose observed workspace media. The engine pins source and proxy hashes before analysis." />
+    {sourceAssets.length ? <section className="studio-variant-list">{sourceAssets.map((asset) => <article className="studio-stage-card" key={asset.id}><code>{asset.id}</code><strong>{asset.name}</strong><p>{asset.intake_status === 'observed_valid' ? 'Observed and ready for analysis' : 'Media validation required'}</p></article>)}</section> : <StageEmpty title="No source video" detail="Import an observed-valid video asset before running shorts analysis." />}
+  </main>;
+  if (intakeStage === 'analysis') return <main className="studio-production-stage" aria-label="Analysis stage">
+    <StageHeading title="Analysis" detail="Transcription, boundaries, subjects, and crop trajectories are immutable for each source and settings hash." />
+    <section className="studio-stage-metrics"><div><span>Revision</span><strong>{production.active_analysis_revision_id ?? 'Not selected'}</strong></div><div><span>Providers</span><strong>Local first</strong></div><div><span>Coordinates</span><strong>Normalized</strong></div><div><span>Fallback</span><strong>Centered / manual</strong></div></section>
+  </main>;
+  if (intakeStage === 'ranked_clips') return <main className="studio-production-stage" aria-label="Ranked clips stage">
+    <StageHeading title="Ranked clips" detail="Clip Quality Score explains hook, flow, value, delivery, visual evidence, and boundary quality." />
+    {ranked.length ? <section className="studio-scene-board">{ranked.map((candidate) => <button type="button" className="studio-stage-card text-left" key={candidate.id} aria-pressed={production.focused_candidate_id === candidate.id} onClick={() => void onProductionUpdate({ focused_candidate_id: candidate.id, active_analysis_revision_id: candidate.evidence?.analysis_revision_id ?? null })}><header><code>{candidate.id}</code><span>{Number(candidate.evidence?.clip_quality_score?.total ?? candidate.confidence * 100).toFixed(1)}</span></header><strong>{candidate.reason}</strong><p>{candidate.evidence?.text ?? 'Transcript excerpt unavailable'}</p></button>)}</section> : <StageEmpty title="No ranked clips" detail="Run source analysis to create evidence-backed clip candidates." />}
+  </main>;
+  return <main className="studio-production-stage" aria-label="Reframe stage">
+    <StageHeading title="Reframe" detail="Review normalized subject tracks, stable split layouts, and visible low-confidence fallbacks before editing." />
+    <section className="studio-stage-metrics"><div><span>Candidate</span><strong>{production.focused_candidate_id ?? 'Not selected'}</strong></div><div><span>Target</span><strong>9:16</strong></div><div><span>Strategy</span><strong>Provider neutral</strong></div><div><span>Manual override</span><strong>Available</strong></div></section>
+    <button className="studio-button primary studio-stage-action" onClick={onOpenEdit}><Scissors size={14} />Open canonical edit</button>
+  </main>;
+}
+
+function StageHeading({ title, detail }: { title: string; detail: string }) {
+  return <header className="studio-stage-heading"><div><span>Production stage</span><h1>{title}</h1></div><p>{detail}</p></header>;
+}
+
+function StageEmpty({ title, detail }: { title: string; detail: string }) {
+  return <section className="studio-stage-empty"><Film size={22} /><strong>{title}</strong><p>{detail}</p></section>;
+}
+
+function ReviewRow({ label, value, ready }: { label: string; value: string; ready: boolean }) {
+  return <div className={ready ? 'ready' : ''}><span>{ready ? <ShieldCheck size={15} /> : <Square size={15} />}{label}</span><strong>{value}</strong></div>;
 }
 
 class SpatialErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -517,7 +931,7 @@ function SpatialWorkspace({
   selectedEntity: SpatialEntity | null;
   show3d: boolean;
   paused: boolean;
-  connection: 'connecting' | 'connected' | 'disconnected';
+  connection: RuntimeConnection;
   onSelect: (id: string) => void;
   onToggle3d: () => void;
   onTogglePause: () => void;
@@ -548,10 +962,7 @@ function SpatialWorkspace({
         </span>)}
       </nav>
       <div className="studio-spatial-controls">
-        <span className={`studio-runtime-state ${connection}`} role="status">
-          {connection === 'connected' ? <Wifi size={13} /> : <WifiOff size={13} />}
-          {connection === 'connected' ? 'Live runtime' : connection === 'connecting' ? 'Connecting' : 'Reconnect pending'}
-        </span>
+        <RuntimeState connection={connection} />
         <button className="studio-button secondary" onClick={onTogglePause} aria-pressed={paused}>
           <EyeOff size={14} />{paused ? 'Resume Codex view' : 'Pause Codex view'}
         </button>
@@ -680,7 +1091,7 @@ function HierarchyTree({
   </div>;
 }
 
-function CaptureControl({ projectId, onComplete }: { projectId: string; onComplete: () => Promise<void> }) {
+function CaptureControl({ projectId, sequenceId, onComplete }: { projectId: string; sequenceId: string; onComplete: () => Promise<void> }) {
   const [mode, setMode] = useState<'screen' | 'camera' | 'microphone' | 'screen_camera'>('screen');
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>('environment');
   const [phase, setPhase] = useState<'idle' | 'requesting' | 'recording' | 'stopping' | 'importing' | 'error'>('idle');
@@ -796,7 +1207,7 @@ function CaptureControl({ projectId, onComplete }: { projectId: string; onComple
         if (!entry.blob.size) continue;
         const form = new FormData();
         form.set('file', new File([entry.blob], entry.fileName, { type: entry.blob.type || 'video/webm' }));
-        const response = await fetch(`/api/projects/${projectId}/assets/upload`, { method: 'POST', body: form });
+        const response = await fetch(`/api/projects/${projectId}/assets/upload?sequence_id=${encodeURIComponent(sequenceId)}`, { method: 'POST', body: form });
         if (!response.ok) throw new Error((await response.json()).message ?? 'Captured track import failed');
         await entry.cleanup();
       }
@@ -838,7 +1249,7 @@ function CaptureControl({ projectId, onComplete }: { projectId: string; onComple
     setMessage('Importing recovered capture.');
     const form = new FormData();
     form.set('file', new File([entry.blob], entry.fileName, { type: entry.blob.type || 'video/webm' }));
-    const response = await fetch(`/api/projects/${projectId}/assets/upload`, { method: 'POST', body: form });
+    const response = await fetch(`/api/projects/${projectId}/assets/upload?sequence_id=${encodeURIComponent(sequenceId)}`, { method: 'POST', body: form });
     if (!response.ok) {
       setPhase('error');
       setMessage('Recovered capture import failed. The device copy was kept.');
@@ -943,11 +1354,13 @@ function NumberField({ label, value, step = '1', onCommit }: { label: string; va
 }
 
 function ActivityDrawer({
-  receipts, context, delivery, onClose,
+  receipts, context, delivery, projectId, sequenceId, onClose,
 }: {
   receipts: Receipt[];
   context: any;
   delivery: { delivery_profiles?: Array<Record<string, any>>; release_approvals?: Array<Record<string, any> & { attempts?: Array<Record<string, any>> }> };
+  projectId: string;
+  sequenceId: string;
   onClose: () => void;
 }) {
   const observed = receipts.filter((receipt) => ['observed_success', 'committed'].includes(receipt.status));
@@ -957,8 +1370,17 @@ function ActivityDrawer({
   const verifiedHash = String(
     latestObserved?.payload?.artifact_sha256 ?? verification?.sha256 ?? verification?.artifact_sha256 ?? '',
   );
+  const latestVerifiedRender = [...receipts]
+    .filter((receipt) => (
+      receipt.command === 'render.verified'
+      && receipt.status === 'observed_success'
+      && receipt.payload?.artifact_id
+      && receipt.payload?.artifact_sha256
+      && receipt.payload?.qc_report?.passed === true
+    ))
+    .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))[0];
   return <aside className="studio-activity" aria-label="Governance and receipts" data-sag-entity-id="viewport:governance" data-sag-action-ids="spatial.frame_entity">
-    <div className="studio-panel-heading"><div className="flex items-center gap-2"><Activity size={16} /><h2>Governance</h2></div><button className="studio-icon-button" onClick={onClose}><X size={16} /></button></div>
+    <div className="studio-panel-heading"><div className="flex items-center gap-2"><Activity size={16} /><h2>Governance</h2></div><button className="studio-icon-button" onClick={onClose} aria-label="Close governance"><X size={16} /></button></div>
     <div className="border-b border-border-base p-4 text-[11px] text-ink-1">
       <div className="flex items-center justify-between"><span>Codex authority</span><strong className="text-ink-0">Sequence scoped</strong></div>
       <div className="mt-2 font-mono text-[9px] leading-5 text-ink-3">{(context?.authority?.scopes ?? []).join(' / ') || 'Browser authority'}</div>
@@ -986,6 +1408,7 @@ function ActivityDrawer({
         <div><dt>Artifact hash</dt><dd><code>{verifiedHash ? verifiedHash.slice(0, 18) : 'not present'}</code></dd></div>
       </dl>
       <p>{latestObserved ? `${latestObserved.command} is ${latestObserved.status.replaceAll('_', ' ')}.` : 'No observed receipt is available yet.'}</p>
+      {latestVerifiedRender ? <VerifiedDownloadLinks projectId={projectId} sequenceId={sequenceId} receipt={latestVerifiedRender} /> : null}
     </section>
     <div className="studio-activity-list">
       {receipts.map((receipt) => <details key={receipt.id} className="studio-receipt">

@@ -14,7 +14,7 @@ from .runtime import RuntimeEventService, sanitize_payload
 
 class DeliveryDestination(BaseModel):
     destination: Literal["youtube_shorts", "tiktok", "instagram_reels", "download"]
-    visibility: Literal["private", "draft", "manual"] = "private"
+    visibility: Literal["private", "draft", "manual", "test"] = "private"
     title: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=5000)
 
@@ -54,7 +54,10 @@ class ReleaseAttemptImportRequest(BaseModel):
     id: str = Field(min_length=1, max_length=160)
     destination: str = Field(min_length=1, max_length=64)
     idempotency_key: str = Field(min_length=8, max_length=160)
-    state: Literal["pending", "uploading", "published", "failed", "ambiguous"] = "pending"
+    state: Literal[
+        "pending", "uploading", "processing", "awaiting_user_action",
+        "verified_private", "published_test", "published", "failed", "ambiguous",
+    ] = "pending"
     external_id: str | None = Field(default=None, max_length=256)
     bounded_error: str | None = Field(default=None, max_length=2000)
     attempt: int = Field(default=0, ge=0, le=1000)
@@ -178,8 +181,8 @@ class DeliveryService:
             (entry.model_dump(mode="json", exclude_none=True) for entry in request.destinations),
             key=lambda entry: entry["destination"],
         )
-        if any(entry["destination"] == "instagram_reels" and entry["visibility"] != "manual" for entry in destinations):
-            raise ValueError("instagram requires manual release until public promotion")
+        if any(entry["destination"] == "instagram_reels" and entry["visibility"] not in {"manual", "test"} for entry in destinations):
+            raise ValueError("instagram requires manual or explicitly confirmed test release until public promotion")
         canonical = {
             "project_id": project_id, "project_revision": project.revision,
             "artifact_hashes": artifact_hashes, "destinations": destinations,

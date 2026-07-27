@@ -67,12 +67,27 @@ def test_short_discovery_acceptance_lineage_and_editable_render_spec(client, tmp
     job = _wait(client, queued.json()["id"])
     assert job["state"] == "observed_success", job
     assert job["stage"] == "complete" and job["progress"] == 1
+    reservations = client.app.state.store.list_editorial_records(
+        kind="usage_reservation", project_id="demo",
+    )
+    events = client.app.state.store.list_editorial_records(kind="usage_event", project_id="demo")
+    assert reservations[0]["state"] == "settled"
+    assert reservations[0]["cost"] == "unknown"
+    assert events[0]["cost"] == "unknown" and events[0]["quantity"] == 1
 
     drafts = client.get("/api/projects/demo/suggestions?state=pending").json()["suggestions"]
     assert drafts
     draft = drafts[0]
     assert draft["evidence"]["source_sha256"] == asset["sha256"]
     assert set(draft["evidence"]["score_components"]) == {"hook", "flow", "value", "delivery", "visual", "boundary"}
+    quality = draft["evidence"]["clip_quality_score"]
+    assert quality["score_policy_version"] == "sag-clip-quality/1.0"
+    assert {entry["name"] for entry in quality["components"]} == {
+        "hook", "flow", "value", "delivery", "visual_evidence", "boundary_quality",
+    }
+    analysis = client.get(f"/api/projects/demo/analysis/{draft['evidence']['analysis_revision_id']}")
+    assert analysis.status_code == 200, analysis.text
+    assert analysis.json()["analysis"]["source_asset_hash"] == asset["sha256"]
     accepted = client.post(f"/api/suggestions/{draft['id']}/accept", json={
         "request_id": "accept-short-0001", "actor": "test", "expected_state": "pending",
     })

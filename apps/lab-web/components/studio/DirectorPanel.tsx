@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, Clapperboard, FileCode2,
   GitBranch, GitCompare, Grid3X3, Lock, Mic2, Play, Plus, RefreshCw, Save, Sparkles, Trash2,
@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import type {
   CreativeBrief, DirectorInput, EngineReceipt, GenerationOperation, RepositoryEvidence, Storyboard,
-  StoryboardScene,
+  StoryboardScene, ProductionSession,
 } from '@/lib/engine';
 import { PromptStudio, type PromptVersion } from './PromptStudio';
 
@@ -39,8 +39,53 @@ const DEFAULT_INPUT: DirectorInput = {
   brand_kit: '', reference_assets: [],
 };
 
-function blankSession(): DirectorSession {
-  return { input: DEFAULT_INPUT, briefVersions: [], promptVersions: [], briefApproved: false, storyboardApproved: false, queue: [], activeTab: 'direction' };
+function sessionFromProduction(production: ProductionSession): DirectorSession {
+  const evidence = production.repository_evidence && production.evidence_revision ? {
+    evidence: production.repository_evidence,
+    evidence_revision: production.evidence_revision,
+    redaction: { status: 'passed', bounded: true },
+    factuality: { status: 'evidence_bound' },
+  } : undefined;
+  const storyboardReceipt = production.storyboard_proposal_receipt_id ? {
+    id: production.storyboard_proposal_receipt_id,
+    command: 'media.propose_storyboard', status: production.approved_storyboard_receipt_id ? 'committed' : 'awaiting_user_consent',
+    actor: 'engine', project_revision: 1, created_at: production.updated_at,
+  } : undefined;
+  return {
+    input: production.director_input ?? DEFAULT_INPUT,
+    evidence,
+    brief: production.active_brief ?? undefined,
+    briefVersions: production.brief_versions.map((brief, index) => ({
+      id: `brief-${index + 1}`, savedAt: production.updated_at, brief,
+    })),
+    promptVersions: production.prompt_revisions as unknown as PromptVersion[],
+    briefApproved: production.brief_approved,
+    storyboard: production.active_storyboard ?? undefined,
+    storyboardReceipt,
+    storyboardApproved: Boolean(production.approved_storyboard_receipt_id),
+    generationReceiptId: production.generation_receipt_id ?? undefined,
+    queue: production.generation_operations as unknown as QueueEntry[],
+    activeTab: production.director_tab,
+  };
+}
+
+function productionPatch(session: DirectorSession): Record<string, unknown> {
+  return {
+    director_tab: session.activeTab,
+    director_input: session.input,
+    repository_evidence: session.evidence?.evidence ?? null,
+    evidence_revision: session.evidence?.evidence_revision ?? null,
+    active_brief: session.brief ?? null,
+    brief_versions: session.briefVersions.map((version) => version.brief),
+    brief_approved: session.briefApproved,
+    active_storyboard: session.storyboard ?? null,
+    storyboard_proposal_receipt_id: session.storyboardReceipt?.id ?? null,
+    approved_storyboard_receipt_id: session.storyboardApproved ? session.storyboardReceipt?.id ?? null : null,
+    prompt_revisions: session.promptVersions,
+    generation_receipt_id: session.generationReceiptId ?? null,
+    operation_ids: session.queue.map((entry) => entry.operationName),
+    generation_operations: session.queue,
+  };
 }
 
 function operationState(operation: GenerationOperation): string {
@@ -110,29 +155,39 @@ async function responseJson(response: Response) {
 }
 
 export function DirectorPanel({
-  projectId, sequenceId, projectRevision, onClose, onProjectRefresh,
+  projectId, sequenceId, projectRevision, production, onProductionUpdate, onClose, onProjectRefresh,
 }: {
-  projectId: string; sequenceId: string; projectRevision: number; onClose: () => void; onProjectRefresh: () => Promise<void>;
+  projectId: string; sequenceId: string; projectRevision: number; production: ProductionSession;
+  onProductionUpdate: (patch: Record<string, unknown>) => Promise<void>;
+  onClose: () => void; onProjectRefresh: () => Promise<void>;
 }) {
-  const storageKey = `sag-director:${projectId}:${sequenceId}`;
-  const [session, setSession] = useState<DirectorSession>(blankSession);
-  const [hydrated, setHydrated] = useState(false);
+  const [session, setSession] = useState<DirectorSession>(() => sessionFromProduction(production));
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [compareOpen, setCompareOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const persistedFingerprint = useRef(JSON.stringify(productionPatch(session)));
+  const pendingPatch = useRef<Record<string, unknown> | null>(null);
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      if (stored) setSession({ ...blankSession(), ...JSON.parse(stored) });
-    } catch { /* Corrupt local proposals are ignored. */ }
-    setHydrated(true);
-  }, [storageKey]);
+    const patch = productionPatch(session);
+    const fingerprint = JSON.stringify(patch);
+    if (fingerprint === persistedFingerprint.current) return;
+    pendingPatch.current = patch;
+    const timer = window.setTimeout(() => {
+      persistedFingerprint.current = fingerprint;
+      void onProductionUpdate(patch).catch((cause) => {
+        persistedFingerprint.current = '';
+        setError(cause instanceof Error ? cause.message : 'Production context could not be saved');
+      }).finally(() => { if (pendingPatch.current === patch) pendingPatch.current = null; });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [session, onProductionUpdate]);
 
-  useEffect(() => {
-    if (hydrated) window.localStorage.setItem(storageKey, JSON.stringify(session));
-  }, [hydrated, session, storageKey]);
+  useEffect(() => () => {
+    const patch = pendingPatch.current;
+    if (patch) void onProductionUpdate(patch);
+  }, [onProductionUpdate]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -245,10 +300,10 @@ export function DirectorPanel({
   }
 
   useEffect(() => {
-    if (!hydrated || !queueActive || !session.generationReceiptId) return;
+    if (!queueActive || !session.generationReceiptId) return;
     const timer = window.setInterval(() => { void pollGeneration(); }, 3000);
     return () => window.clearInterval(timer);
-  }, [hydrated, queueActive, session.generationReceiptId, projectId, sequenceId]);
+  }, [queueActive, session.generationReceiptId, projectId, sequenceId]);
 
   function updateInput<K extends keyof DirectorInput>(key: K, value: DirectorInput[K]) {
     setSession((current) => ({ ...current, input: { ...current.input, [key]: value } }));
@@ -277,8 +332,6 @@ export function DirectorPanel({
       return { ...current, storyboardApproved: false, storyboard: { ...current.storyboard, scenes: normalizeSceneStarts(scenes) } };
     });
   }
-
-  if (!hydrated) return <aside className="director-panel" aria-label="Director" data-sag-entity-id="viewport:director" data-sag-action-ids="spatial.frame_entity"><div className="director-loading">Loading saved direction</div></aside>;
 
   return <aside className="director-panel" aria-label="Director workspace" data-sag-entity-id="viewport:director" data-sag-action-ids="spatial.frame_entity">
     <header className="director-header">
@@ -409,7 +462,7 @@ function StoryboardTab({ storyboard, problems, approved, briefApproved, busy, on
     <div className="director-scenes">
       {storyboard.scenes.map((scene, index) => <article key={scene.id} className={`director-scene ${scene.locked ? 'locked' : ''}`}>
         <header><div><code>{scene.id}</code><span>{scene.start_seconds.toFixed(1)}s to {(scene.start_seconds + scene.duration_seconds).toFixed(1)}s</span></div><div><button onClick={() => onMove(index, -1)} disabled={index === 0 || scene.locked} aria-label={`Move ${scene.id} earlier`}><ArrowUp size={14} /></button><button onClick={() => onMove(index, 1)} disabled={index === storyboard.scenes.length - 1 || scene.locked} aria-label={`Move ${scene.id} later`}><ArrowDown size={14} /></button><button onClick={() => onChange(scene.id, { locked: !scene.locked })} aria-label={scene.locked ? `Unlock ${scene.id}` : `Lock ${scene.id}`}>{scene.locked ? <Unlock size={14} /> : <Lock size={14} />}</button></div></header>
-        <div className="director-field-row"><DirectorField label="Duration"><input disabled={scene.locked} type="number" min="0.1" max="60" step="0.1" value={scene.duration_seconds} onChange={(event) => onChange(scene.id, { duration_seconds: Number(event.target.value) })} /></DirectorField><DirectorField label="Generation model"><select disabled={scene.locked} value={scene.generation_model} onChange={(event) => onChange(scene.id, { generation_model: event.target.value })}><option value="gemini-omni-flash-preview">Omni (default)</option><option value="veo-3.1-lite-generate-preview">Veo Lite preview</option><option value="veo-3.1-generate-preview">Veo controlled shot</option></select></DirectorField></div>
+        <div className="director-field-row"><DirectorField label="Duration"><input disabled={scene.locked} type="number" min="0.1" max="60" step="0.1" value={scene.duration_seconds} onChange={(event) => onChange(scene.id, { duration_seconds: Number(event.target.value) })} /></DirectorField><DirectorField label="Generation model"><select disabled={scene.locked} value={scene.generation_model} onChange={(event) => onChange(scene.id, { generation_model: event.target.value })}><option value="gemini-omni-flash-preview">Omni (default)</option><option value="veo-3.1-lite-generate-preview">Veo Lite preview</option><option value="veo-3.1-generate-preview">Veo controlled shot</option><option value="Wan-AI/Wan2.2-TI2V-5B">Wan 2.2 via HF/fal (5s)</option></select></DirectorField></div>
         <DirectorField label="Purpose"><input disabled={scene.locked} value={scene.purpose} onChange={(event) => onChange(scene.id, { purpose: event.target.value })} /></DirectorField>
         <DirectorField label="Narration"><textarea disabled={scene.locked} className="compact" value={scene.narration} onChange={(event) => onChange(scene.id, { narration: event.target.value })} /></DirectorField>
         <DirectorField label="Visual direction"><textarea disabled={scene.locked} value={scene.visual_direction} onChange={(event) => onChange(scene.id, { visual_direction: event.target.value })} /></DirectorField>

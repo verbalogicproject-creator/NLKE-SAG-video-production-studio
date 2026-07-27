@@ -29,8 +29,8 @@
   --signal-warn: 255 178 36;  /* same as amber — ATTENTION */
 
   /* Typography — display for prose, mono for all data */
-  --font-display: 'Söhne', 'Geist', 'Inter', system-ui, sans-serif;
-  --font-mono:    'IBM Plex Mono', 'Geist Mono', ui-monospace, monospace;
+  --font-display: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono:    ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 
   /* Rhythm — 4px base unit, minimal rounding for industrial feel */
   --unit:   4px;

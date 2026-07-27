@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Cascade"
+  short_description: "Run auditable Sol, Terra, and Luna task cascades"
+  default_prompt: "Use $model-cascade to plan, delegate, verify, and summarize this repository task with the least expensive suitable model."

@@ -35,6 +35,8 @@ class Asset(BaseModel):
         "termux_microphone",
         "asciinema",
         "playwright",
+        "browser_screenshot",
+        "playwright_screenshot",
         "android_companion",
         "generated",
         "derived",
@@ -79,7 +81,9 @@ class CaptionWord(BaseModel):
 
 
 class CaptionStyle(BaseModel):
-    preset: Literal["bold_pop", "clean", "minimal"] = "bold_pop"
+    preset: Literal[
+        "clean", "karaoke", "bold_pop", "glow_pulse", "typewriter_reveal", "minimal",
+    ] = "bold_pop"
     font_family: str = Field(default="Noto Sans", min_length=1, max_length=120, pattern=r"^[^,\r\n]+$")
     font_size: int = Field(default=64, ge=16, le=160)
     text_color: str = Field(default="#FFFFFF", pattern=r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
@@ -327,6 +331,7 @@ class ObservationContract(BaseModel):
     fps: float
     title_id: str | None = None
     title_active_seconds: float | None = None
+    title_bounds: tuple[int, int, int, int] | None = None
     safe_margin_x: int
     safe_margin_y: int
     marker_rgb: tuple[int, int, int] | None = None

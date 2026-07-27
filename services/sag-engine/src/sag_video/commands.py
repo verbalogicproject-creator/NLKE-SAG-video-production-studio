@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -30,11 +31,13 @@ class CommandService:
         "timeline.delete_item": "_delete_item",
         "timeline.set_clip_transform": "_set_clip_transform",
         "timeline.set_audio_gain": "_set_audio_gain",
+        "timeline.create_title": "_create_title",
         "timeline.set_title": "_set_title",
         "timeline.set_title_transform": "_set_title_transform",
         "timeline.set_caption_style": "_set_caption_style",
         "timeline.set_caption_words": "_set_caption_words",
         "timeline.set_crop_keyframes": "_set_crop_keyframes",
+        "project.rename": "_rename",
         "project.undo": "_undo",
         "project.redo": "_redo",
     }
@@ -272,9 +275,13 @@ class CommandService:
             raise CommandValidationError(f"unknown asset: {asset_id}") from error
         if asset.intake_status != "observed_valid" or not asset.managed_uri:
             raise CommandValidationError("only observed-valid managed assets can be inserted")
-        expected_track_kind = "video" if asset.kind == "video" else "audio" if asset.kind == "audio" else None
+        expected_track_kind = (
+            "video" if asset.kind == "video" else
+            "audio" if asset.kind == "audio" else
+            "overlay" if asset.kind == "image" else None
+        )
         if expected_track_kind is None:
-            raise CommandValidationError("only video and audio assets are insertable in this phase")
+            raise CommandValidationError("only video, audio, and image assets are insertable")
         requested_track = arguments.get("track_id")
         track = next(
             (
@@ -286,9 +293,9 @@ class CommandService:
         )
         if track is None:
             raise CommandValidationError(f"no compatible {expected_track_kind} track exists")
-        duration = int(asset.duration_ticks or 0)
+        duration = int(arguments.get("duration_ticks") or asset.duration_ticks or 0)
         if duration <= 0:
-            raise CommandValidationError("asset has no observed positive duration")
+            raise CommandValidationError("image assets require duration_ticks; timed media requires observed duration")
         default_start = max((item.start_ticks + item.duration_ticks for item in track.items), default=0)
         start = int(arguments.get("start_ticks", default_start))
         if start < 0:
@@ -297,13 +304,13 @@ class CommandService:
 
         item = TimelineItem(
             id=f"item_{uuid4().hex[:16]}",
-            kind=expected_track_kind,
+            kind="image" if asset.kind == "image" else expected_track_kind,
             track_id=track.id,
             name=asset.name,
             start_ticks=start,
             duration_ticks=duration,
             source_in_ticks=0,
-            source_out_ticks=duration,
+            source_out_ticks=None if asset.kind == "image" else duration,
             asset_id=asset.id,
             color="#17213a" if expected_track_kind == "video" else "#163a35",
         )
@@ -484,6 +491,45 @@ class CommandService:
             item.muted = bool(arguments["muted"])
         return {"item_id": item.id, "gain_db": item.gain_db, "muted": item.muted}
 
+    def _create_title(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
+        text = str(self._required(arguments, "text")).strip()
+        if not text or len(text) > 500:
+            raise CommandValidationError("title text must contain 1 to 500 characters")
+        start = int(self._required(arguments, "start_ticks"))
+        duration = int(self._required(arguments, "duration_ticks"))
+        if start < 0 or duration <= 0:
+            raise CommandValidationError("title timing must be positive and start on the timeline")
+        requested_track = arguments.get("track_id")
+        track = next((
+            candidate for candidate in project.tracks
+            if candidate.kind == "overlay" and (requested_track is None or candidate.id == requested_track)
+        ), None)
+        if track is None:
+            raise CommandValidationError("no compatible overlay track exists")
+        color = str(arguments.get("color", "#101820"))
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
+            raise CommandValidationError("title color must be a six-digit hex color")
+        from .models import TimelineItem
+
+        item = TimelineItem(
+            id=f"item_{uuid4().hex[:16]}", kind="title", track_id=track.id,
+            name=text[:80], text=text, start_ticks=start, duration_ticks=duration,
+            x=int(arguments.get("x", round(project.canvas.width * .06))),
+            y=int(arguments.get("y", round(project.canvas.height * .76))),
+            width=int(arguments.get("width", round(project.canvas.width * .88))),
+            height=int(arguments.get("height", round(project.canvas.height * .12))),
+            color=color,
+        )
+        if item.width <= 0 or item.height <= 0:
+            raise CommandValidationError("title dimensions must be positive")
+        track.items.append(item)
+        track.items.sort(key=lambda entry: (entry.start_ticks, entry.id))
+        project.duration_ticks = max(project.duration_ticks, start + duration)
+        return {
+            "item_id": item.id, "track_id": track.id, "text": item.text,
+            "start_ticks": start, "duration_ticks": duration,
+        }
+
     def _set_title(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
         item_id = str(self._required(arguments, "item_id"))
         try:
@@ -512,7 +558,12 @@ class CommandService:
                 if field in {"width", "height"} and value <= 0:
                     raise CommandValidationError(f"{field} must be positive")
                 setattr(item, field, value)
-        return {"item_id": item.id, "x": item.x, "y": item.y, "width": item.width, "height": item.height}
+        if "color" in arguments:
+            color = str(arguments["color"])
+            if not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
+                raise CommandValidationError("title color must be a six-digit hex color")
+            item.color = color
+        return {"item_id": item.id, "x": item.x, "y": item.y, "width": item.width, "height": item.height, "color": item.color}
 
     def _set_caption_style(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
         item_id = str(self._required(arguments, "item_id"))
@@ -556,18 +607,28 @@ class CommandService:
             item = project.item(item_id)
         except KeyError as error:
             raise CommandValidationError(f"unknown item: {item_id}") from error
-        if item.kind != "video":
-            raise CommandValidationError("crop keyframes require a video item")
+        if item.kind not in {"video", "image"}:
+            raise CommandValidationError("crop keyframes require a video or image item")
         try:
             keyframes = [CropKeyframe.model_validate(value) for value in self._required(arguments, "keyframes")]
         except ValueError as error:
             raise CommandValidationError(f"invalid crop keyframes: {error}") from error
         keyframes.sort(key=lambda entry: entry.time_ticks)
         if not keyframes or keyframes[-1].time_ticks > item.duration_ticks:
-            raise CommandValidationError("crop keyframes must lie inside the video item")
+            raise CommandValidationError("crop keyframes must lie inside the visual item")
         item.crop_keyframes = keyframes
         item.fit_mode = "fill"
         return {"item_id": item.id, "keyframe_count": len(keyframes)}
+
+    def _rename(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
+        name = str(self._required(arguments, "name")).strip()
+        if not name:
+            raise CommandValidationError("project name cannot be blank")
+        if len(name) > 120:
+            raise CommandValidationError("project name cannot exceed 120 characters")
+        previous_name = project.name
+        project.name = name
+        return {"previous_name": previous_name, "name": name}
 
     def _undo(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
         target = self.store.previous_edit_revision(project.id)

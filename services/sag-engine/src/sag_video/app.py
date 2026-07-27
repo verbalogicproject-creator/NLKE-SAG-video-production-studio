@@ -5,6 +5,7 @@ import importlib.util
 import hmac
 import hashlib
 import json
+from io import BytesIO
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -83,7 +84,10 @@ from .journal import (
 )
 from .x1_context import x1_context_schemas
 from .model_registry import MODEL_REGISTRY_VERSION, model_registry, model_registry_hash
-from .generative import GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter, ProviderOperation
+from .generative import (
+    GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter,
+    HFInferenceVideoAdapter, ProviderOperation,
+)
 from .repo_to_video import (
     CreativeBrief,
     GitHubEvidenceClient,
@@ -107,6 +111,40 @@ from .repo_to_video import (
     storyboard_response_schema,
 )
 from .generation_materializer import materialize
+from .production import (
+    PRODUCTION_SESSION_SCHEMA_VERSION,
+    ProductionSessionUpdate,
+    production_schemas,
+)
+from .screenshots import (
+    ScreenshotCaptureRequest,
+    ScreenshotDecisionRequest,
+    ScreenshotRecipeRequest,
+    ScreenshotService,
+    VisualProofPlanRequest,
+    screenshot_schemas,
+)
+from .production_intelligence import (
+    BrollCandidate,
+    BrollDecision,
+    BrollDecisionRequest,
+    BrollSearchRequest,
+    BrandKitRevision,
+    BrandKitUpdate,
+    ClipQualityScore,
+    ClipScoreRequest,
+    EditorialFeedback,
+    EditorialFeedbackRequest,
+    ExportBundle,
+    ExportRequest,
+    ReviewDecision,
+    ReviewDecisionRequest,
+    SourceAnalysisRevision,
+    VariantDefinition,
+    VariantUpdate,
+    deterministic_range_score,
+    production_intelligence_schemas,
+)
 
 
 @dataclass(frozen=True)
@@ -199,6 +237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     directives = SpatialDirectiveService(store, spatial, runtime, spatial_frames)
     connections = ProviderConnectionService(store)
     delivery = DeliveryService(store, runtime)
+    screenshots = ScreenshotService(store)
     capabilities = detect_capabilities()
     capabilities["generative_media"] = {
         "provider": "google",
@@ -212,6 +251,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         },
     }
     generative = GoogleGenerativeAdapter()
+    hf_generative = HFInferenceVideoAdapter()
     repo_evidence = GitHubEvidenceClient(os.getenv("GITHUB_TOKEN") or None)
     media = MediaService(
         store,
@@ -277,7 +317,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.directives = directives
     application.state.connections = connections
     application.state.delivery = delivery
+    application.state.screenshots = screenshots
     application.state.generative = generative
+    application.state.hf_generative = hf_generative
     application.state.repo_evidence = repo_evidence
     application.state.spatial_frames = spatial_frames
 
@@ -503,8 +545,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "delivery_profile": {"identity": "stable engine-owned delivery profile.id scoped to a project"},
                 "release_approval": {"identity": "stable engine-owned approval.id bound to revision, artifact hashes, destinations, and human actor"},
                 "publication_attempt": {"identity": "stable engine-owned attempt.id bound to one approval and destination"},
+                "production_session": {"identity": "one engine-owned, revisioned Studio workflow cursor per project"},
                 "analysis_artifact": {"identity": "immutable provider-and-settings-versioned analysis.id"},
                 "suggestion": {"identity": "stable auditable suggestion.id tied to an exact source revision"},
+                "screenshot_recipe": {"identity": "immutable semantic capture recipe scoped to a project"},
+                "screenshot_capture": {"identity": "managed image hash bound to one recipe and source revision"},
             },
             "commands": declared_commands(),
             "actions": declared_actions(),
@@ -520,6 +565,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "generative_media": capabilities["generative_media"],
             "prompt_studio_schema_version": "sag-prompt-studio/0.1",
             "prompt_studio_schemas": prompt_studio_schemas(),
+            "production_session_schema_version": PRODUCTION_SESSION_SCHEMA_VERSION,
+            "production_schemas": production_schemas(),
+            "production_intelligence_schemas": production_intelligence_schemas(),
+            "screenshot_schemas": screenshot_schemas(),
             "projection_version": PROJECTION_VERSION,
             "spatial_frame_schema_version": SPATIAL_FRAME_SCHEMA_VERSION,
             "spatial_computer_use": {
@@ -625,6 +674,433 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "factuality": {"status": "evidence_bound", "unsupported_claims_allowed": False},
             "next_step": "generate_creative_brief_then_review_storyboard",
         }
+
+    @application.get("/api/projects/{project_id}/repo-to-video/production")
+    def get_production_session(project_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        return {"production": store.get_production_session(project_id).model_dump(mode="json")}
+
+    @application.put("/api/projects/{project_id}/repo-to-video/production")
+    def put_production_session(
+        project_id: str, body: ProductionSessionUpdate, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            production = store.put_production_session(
+                project_id,
+                expected_revision=body.expected_revision,
+                patch=body.patch(),
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"production": production.model_dump(mode="json")}
+
+    # Canonical workflow-neutral route. The repo-to-video path above remains a
+    # compatibility wrapper for existing Studio clients.
+    @application.get("/api/projects/{project_id}/production")
+    def get_canonical_production_session(project_id: str, http_request: Request) -> dict:
+        return get_production_session(project_id, http_request)
+
+    @application.put("/api/projects/{project_id}/production")
+    def put_canonical_production_session(
+        project_id: str, body: ProductionSessionUpdate, http_request: Request,
+    ) -> dict:
+        return put_production_session(project_id, body, http_request)
+
+    @application.post("/api/projects/{project_id}/screenshot-recipes", status_code=201)
+    def create_screenshot_recipe(
+        project_id: str, body: ScreenshotRecipeRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            recipe = screenshots.create_recipe(project_id, body)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"recipe": recipe.model_dump(mode="json")}
+
+    @application.get("/api/projects/{project_id}/screenshot-recipes")
+    def list_screenshot_recipes(project_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        return {"recipes": [entry.model_dump(mode="json") for entry in screenshots.list_recipes(project_id)]}
+
+    @application.post("/api/projects/{project_id}/screenshot-captures", status_code=201)
+    def create_screenshot_capture(
+        project_id: str, body: ScreenshotCaptureRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            capture = screenshots.create_capture(project_id, body)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"capture": capture.model_dump(mode="json")}
+
+    @application.get("/api/projects/{project_id}/screenshot-captures")
+    def list_screenshot_captures(
+        project_id: str, http_request: Request,
+        source_commit: str | None = Query(default=None, min_length=7, max_length=64),
+        application_revision: str | None = Query(default=None, min_length=1, max_length=160),
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        return {"captures": screenshots.list_captures(
+            project_id, source_commit=source_commit, application_revision=application_revision,
+        )}
+
+    @application.post(
+        "/api/projects/{project_id}/screenshot-captures/{capture_id}/decisions", status_code=201,
+    )
+    def decide_screenshot_capture(
+        project_id: str, capture_id: str, body: ScreenshotDecisionRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            return screenshots.decide(project_id, capture_id, body)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.post("/api/projects/{project_id}/visual-proof-plans", status_code=201)
+    def create_visual_proof_plan(
+        project_id: str, body: VisualProofPlanRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            return {"visual_proof_plan": screenshots.create_visual_proof_plan(project_id, body)}
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.get("/api/projects/{project_id}/analysis/{revision_id}")
+    def get_source_analysis_revision(
+        project_id: str, revision_id: str, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        try:
+            artifact = store.get_analysis_artifact(revision_id)
+        except KeyError as error:
+            raise HTTPException(404, "analysis revision not found") from error
+        if artifact.project_id != project_id or artifact.kind != "source_analysis_revision":
+            raise HTTPException(404, "analysis revision not found")
+        return {"analysis": SourceAnalysisRevision.model_validate(artifact.body).model_dump(mode="json")}
+
+    @application.post("/api/projects/{project_id}/shorts/score")
+    def score_short_range(project_id: str, body: ClipScoreRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "analysis:run")
+        try:
+            project = store.get_project_revision(project_id, body.source_revision)
+        except KeyError as error:
+            raise HTTPException(404, "project revision not found") from error
+        suggestion = None
+        if body.suggestion_id:
+            try:
+                suggestion = store.get_suggestion(body.suggestion_id)
+            except KeyError as error:
+                raise HTTPException(404, "suggestion not found") from error
+            if suggestion.project_id != project_id or suggestion.source_revision != body.source_revision:
+                raise HTTPException(404, "suggestion not found for this source revision")
+            historical = suggestion.evidence.get("clip_quality_score")
+            if historical and body.component_scores is None:
+                return {
+                    "score_id": f"score_{suggestion.id}",
+                    "suggestion_id": suggestion.id,
+                    "historical": True,
+                    "score": ClipQualityScore.model_validate(historical).model_dump(mode="json"),
+                    "range": {
+                        "start_ticks": int(suggestion.evidence["start_ticks"]),
+                        "end_ticks": int(suggestion.evidence["end_ticks"]),
+                    },
+                    "analysis_revision_id": suggestion.evidence.get("analysis_revision_id"),
+                }
+        analysis_id = body.analysis_revision_id or (
+            suggestion.evidence.get("analysis_revision_id") if suggestion else None
+        )
+        analysis = None
+        if analysis_id:
+            try:
+                artifact = store.get_analysis_artifact(str(analysis_id))
+            except KeyError as error:
+                raise HTTPException(404, "analysis revision not found") from error
+            if artifact.project_id != project_id or artifact.kind != "source_analysis_revision":
+                raise HTTPException(404, "analysis revision not found")
+            analysis = SourceAnalysisRevision.model_validate(artifact.body)
+        elif revisions := store.list_analysis_artifacts(project_id, kind="source_analysis_revision"):
+            analysis = SourceAnalysisRevision.model_validate(revisions[0].body)
+
+        start_ticks = int(body.start_ticks if body.start_ticks is not None else suggestion.evidence["start_ticks"])
+        end_ticks = int(body.end_ticks if body.end_ticks is not None else suggestion.evidence["end_ticks"])
+        if end_ticks > project.duration_ticks:
+            raise HTTPException(422, "selected range exceeds the source project duration")
+        transcript: dict[str, Any] = {}
+        features: dict[str, Any] = {}
+        if analysis:
+            if analysis.transcript_artifact_id:
+                transcript = store.get_analysis_artifact(analysis.transcript_artifact_id).body
+            if analysis.feature_artifact_id:
+                features = store.get_analysis_artifact(analysis.feature_artifact_id).body
+        text_value = " ".join(
+            str(word.get("text", "")) for word in transcript.get("words", [])
+            if start_ticks <= int(word.get("start_ticks", -1)) and int(word.get("end_ticks", -1)) <= end_ticks
+        ).strip()
+        if not text_value and suggestion:
+            text_value = str(suggestion.evidence.get("text") or "")
+        score = deterministic_range_score(
+            text=text_value, start_ticks=start_ticks, end_ticks=end_ticks, features=features,
+            content_profile=(analysis.analysis_profile if analysis else body.content_profile),
+            explicit=body.component_scores,
+        )
+        score_id = f"score_{uuid4().hex[:16]}"
+        payload = {
+            "id": score_id, "project_id": project_id, "source_revision": body.source_revision,
+            "suggestion_id": body.suggestion_id, "analysis_revision_id": analysis.id if analysis else None,
+            "range": {"start_ticks": start_ticks, "end_ticks": end_ticks},
+            "score": score.model_dump(mode="json"), "created_at": __import__("sag_video.models", fromlist=["utc_now"]).utc_now(),
+        }
+        store.put_editorial_record(
+            record_id=score_id, kind="clip_quality_score", body=payload, expected_revision=0,
+            project_id=project_id, workspace_id=project.workspace_id or project.id, append_only=True,
+        )
+        return {**payload, "historical": False}
+
+    @application.post("/api/projects/{project_id}/shorts/suggestions/{suggestion_id}/feedback", status_code=201)
+    def record_short_feedback(
+        project_id: str, suggestion_id: str, body: EditorialFeedbackRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            suggestion = store.get_suggestion(suggestion_id)
+        except KeyError as error:
+            raise HTTPException(404, "suggestion not found") from error
+        if suggestion.project_id != project_id:
+            raise HTTPException(404, "suggestion not found")
+        allowed = {
+            "weak_hook", "poor_flow", "low_value", "delivery", "visuals",
+            "bad_boundary", "duplicate", "off_brand", "other",
+        }
+        unknown = set(body.reasons) - allowed
+        if unknown:
+            raise HTTPException(422, f"unknown feedback reasons: {', '.join(sorted(unknown))}")
+        feedback = EditorialFeedback(
+            id=f"feedback_{uuid4().hex[:16]}", project_id=project_id, suggestion_id=suggestion_id,
+            decision=body.decision, reasons=body.reasons, note=body.note,
+            actor=getattr(http_request.state, "actor", body.actor),
+        )
+        project = store.get_project(project_id)
+        stored = store.put_editorial_record(
+            record_id=feedback.id, kind="editorial_feedback", body=feedback.model_dump(mode="json"),
+            expected_revision=0, project_id=project_id, workspace_id=project.workspace_id or project.id,
+            append_only=True,
+        )
+        return {"feedback": stored}
+
+    @application.post("/api/projects/{project_id}/b-roll/search")
+    def search_broll(project_id: str, body: BrollSearchRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        project = store.get_project(project_id)
+        terms = set(body.query.casefold().split())
+        ranked: list[tuple[int, Any]] = []
+        for asset in project.assets:
+            haystack = f"{asset.name} {asset.original_filename or ''} {asset.source_kind}".casefold()
+            score = sum(term in haystack for term in terms)
+            if score or not ranked:
+                ranked.append((score, asset))
+        ranked.sort(key=lambda item: (-item[0], item[1].name.casefold(), item[1].id))
+        candidates = []
+        for _, asset in ranked[:body.limit]:
+            authentic = asset.source_kind in {"upload", "android_picker", "asciinema", "playwright", "termux_microphone"}
+            source_kind = "repository_capture" if asset.source_kind in {"asciinema", "playwright"} else "workspace_media"
+            candidate = BrollCandidate(
+                id=f"broll_{hashlib.sha256(f'{project_id}:{asset.id}:{body.query}'.encode()).hexdigest()[:16]}",
+                project_id=project_id, source_kind=source_kind, asset_id=asset.id,
+                uri=asset.managed_uri, description=asset.name,
+                provenance={"asset_sha256": asset.sha256, "source_kind": asset.source_kind},
+                license_status="workspace_owned", semantic_confidence=min(1, .55 + .1 * len(terms)),
+                claim_association=body.claim_ids, authentic_evidence=authentic,
+            )
+            try:
+                store.put_editorial_record(
+                    record_id=candidate.id, kind="broll_candidate", body=candidate.model_dump(mode="json"),
+                    expected_revision=0, project_id=project_id,
+                    workspace_id=project.workspace_id or project.id, append_only=True,
+                )
+            except ValueError:
+                pass
+            candidates.append(candidate.model_dump(mode="json"))
+        return {
+            "candidates": candidates,
+            "provider_status": {"workspace_media": "searched", "stock": "deferred"},
+            "policy": "generated and stock media cannot satisfy authentic factual evidence",
+        }
+
+    @application.post("/api/projects/{project_id}/b-roll/candidates/{candidate_id}/decisions", status_code=201)
+    def decide_broll(
+        project_id: str, candidate_id: str, body: BrollDecisionRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            candidate = BrollCandidate.model_validate(
+                store.get_editorial_record(candidate_id, kind="broll_candidate")
+            )
+        except KeyError as error:
+            raise HTTPException(404, "B-roll candidate not found") from error
+        if candidate.project_id != project_id:
+            raise HTTPException(404, "B-roll candidate not found")
+        if body.decision == "approved" and candidate.license_status not in {"workspace_owned", "verified"}:
+            raise HTTPException(409, "B-roll license must be verified before approval")
+        decision = BrollDecision(
+            id=f"broll_decision_{uuid4().hex[:16]}", project_id=project_id,
+            candidate_id=candidate_id, decision=body.decision,
+            actor=getattr(http_request.state, "actor", body.actor), note=body.note,
+        )
+        project = store.get_project(project_id)
+        stored = store.put_editorial_record(
+            record_id=decision.id, kind="broll_decision", body=decision.model_dump(mode="json"),
+            expected_revision=0, project_id=project_id, workspace_id=project.workspace_id or project.id,
+            append_only=True,
+        )
+        return {"decision": stored, "inserted": False}
+
+    @application.get("/api/workspaces/{workspace_id}/brand-kits/{brand_kit_id}")
+    def get_brand_kit(workspace_id: str, brand_kit_id: str, http_request: Request) -> dict:
+        _require_workspace_identity(http_request, workspace_id)
+        try:
+            brand = store.get_editorial_record(brand_kit_id, kind="brand_kit")
+        except KeyError as error:
+            raise HTTPException(404, "brand kit not found") from error
+        if brand.get("workspace_id") != workspace_id:
+            raise HTTPException(404, "brand kit not found")
+        return {"brand_kit": BrandKitRevision.model_validate(brand).model_dump(mode="json")}
+
+    @application.put("/api/workspaces/{workspace_id}/brand-kits/{brand_kit_id}")
+    def put_brand_kit(
+        workspace_id: str, brand_kit_id: str, body: BrandKitUpdate, http_request: Request,
+    ) -> dict:
+        _require_workspace_identity(http_request, workspace_id)
+        _require_scope(http_request, "project:write")
+        payload = body.model_dump(exclude={"expected_revision"}, mode="json")
+        payload.update({"id": brand_kit_id, "workspace_id": workspace_id,
+                        "revision": max(1, body.expected_revision + 1)})
+        try:
+            validated = BrandKitRevision.model_validate(payload)
+            stored = store.put_editorial_record(
+                record_id=brand_kit_id, kind="brand_kit", body=validated.model_dump(mode="json"),
+                expected_revision=body.expected_revision, workspace_id=workspace_id,
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"brand_kit": BrandKitRevision.model_validate(stored).model_dump(mode="json")}
+
+    @application.get("/api/projects/{project_id}/variants/{variant_id}")
+    def get_variant(project_id: str, variant_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        try:
+            variant = store.get_editorial_record(variant_id, kind="variant")
+        except KeyError as error:
+            raise HTTPException(404, "variant not found") from error
+        if variant.get("project_id") != project_id:
+            raise HTTPException(404, "variant not found")
+        return {"variant": VariantDefinition.model_validate(variant).model_dump(mode="json")}
+
+    @application.put("/api/projects/{project_id}/variants/{variant_id}")
+    def put_variant(
+        project_id: str, variant_id: str, body: VariantUpdate, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        project = store.get_project(project_id)
+        stale: list[str] = []
+        if body.master_revision != project.revision:
+            current_items = {item.id for track in project.tracks for item in track.items}
+            override_ids = (
+                set(body.crop_overrides) | set(body.caption_overrides) | set(body.timing_overrides)
+                | set(body.inclusion_overrides) | set(body.title_overrides) | set(body.audio_overrides)
+            )
+            stale = sorted(override_ids - current_items)
+        payload = body.model_dump(exclude={"expected_revision"}, mode="json")
+        payload.update({
+            "id": variant_id, "project_id": project_id,
+            "revision": max(1, body.expected_revision + 1), "stale_overrides": stale,
+        })
+        try:
+            validated = VariantDefinition.model_validate(payload)
+            stored = store.put_editorial_record(
+                record_id=variant_id, kind="variant", body=validated.model_dump(mode="json"),
+                expected_revision=body.expected_revision, project_id=project_id,
+                workspace_id=project.workspace_id or project.id,
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"variant": VariantDefinition.model_validate(stored).model_dump(mode="json")}
+
+    @application.post("/api/projects/{project_id}/review/decisions", status_code=201)
+    def record_review_decision(
+        project_id: str, body: ReviewDecisionRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        project = store.get_project(project_id)
+        if body.project_revision != project.revision:
+            raise StaleRevisionError(body.project_revision, project.revision)
+        decision = ReviewDecision(
+            id=f"review_{uuid4().hex[:16]}", project_id=project_id,
+            actor=getattr(http_request.state, "actor", body.actor), **body.model_dump(exclude={"actor"}),
+        )
+        stored = store.put_editorial_record(
+            record_id=decision.id, kind="review_decision", body=decision.model_dump(mode="json"),
+            expected_revision=0, project_id=project_id, workspace_id=project.workspace_id or project.id,
+            append_only=True,
+        )
+        return {"decision": stored}
+
+    @application.post("/api/projects/{project_id}/exports", status_code=202)
+    def create_export(project_id: str, body: ExportRequest, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "render:run")
+        receipt = start_render(
+            project_id,
+            RenderRequest(project_revision=body.project_revision, request_id=body.request_id, actor=body.actor),
+            http_request,
+        )
+        project = store.get_project(project_id)
+        export_id = f"export_{receipt.id}"
+        bundle = ExportBundle(
+            id=export_id, project_id=project_id, project_revision=body.project_revision,
+            variant_id=body.variant_id, render_receipt_id=receipt.id,
+        )
+        try:
+            stored = store.put_editorial_record(
+                record_id=export_id, kind="export_bundle", body=bundle.model_dump(mode="json"),
+                expected_revision=0, project_id=project_id, workspace_id=project.workspace_id or project.id,
+                append_only=True,
+            )
+        except ValueError:
+            stored = store.get_editorial_record(export_id, kind="export_bundle")
+        return {"export": stored, "receipt": receipt.model_dump(mode="json")}
+
+    @application.get("/api/projects/{project_id}/exports/{receipt_id}")
+    def get_export(project_id: str, receipt_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        try:
+            receipt = store.get_receipt(receipt_id)
+            bundle = store.get_editorial_record(f"export_{receipt_id}", kind="export_bundle")
+        except KeyError as error:
+            raise HTTPException(404, "export receipt not found") from error
+        if receipt.project_id != project_id:
+            raise HTTPException(404, "export receipt not found")
+        state = "verified" if receipt.status == ReceiptStatus.OBSERVED_SUCCESS else (
+            "failed" if receipt.status in {ReceiptStatus.EXECUTION_FAILED, ReceiptStatus.OBSERVED_FAILURE} else "rendering"
+        )
+        return {"export": {**bundle, "state": state}, "receipt": receipt.model_dump(mode="json")}
 
     @application.post("/api/projects/{project_id}/repo-to-video/storyboard", status_code=202)
     def propose_repository_storyboard(project_id: str, body: RepoVideoRequest, http_request: Request) -> dict:
@@ -795,7 +1271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             existing_operations = [
                 {
                     "request_id": existing.id,
-                    "provider": "google",
+                    "provider": item.get("provider", "google"),
                     "state": "pending",
                     **item,
                 }
@@ -828,8 +1304,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "scene_id": item.get("scene_id"),
                     "operation_name": item["operation_name"],
                     "model": item["model"],
+                    "provider": item.get("provider", "google"),
                     "state": item.get("state", "pending"),
                     **({"asset_id": item["asset_id"]} if item.get("asset_id") else {}),
+                    **({"content_sha256": item["content_sha256"]} if item.get("content_sha256") else {}),
+                    **({"byte_size": item["byte_size"]} if item.get("byte_size") else {}),
                 }
                 for item in operations
             ]
@@ -877,8 +1356,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         try:
             for scene in body.storyboard.scenes:
-                model = scene.generation_model if scene.generation_model in {"gemini-omni-flash-preview", "veo-3.1-generate-preview", "veo-3.1-lite-generate-preview"} else "gemini-omni-flash-preview"
+                model = scene.generation_model
                 prompt = scene_generation_prompt(scene, body.creative_brief, aspect_ratio=body.aspect_ratio)
+                if model == "Wan-AI/Wan2.2-TI2V-5B":
+                    request = GenerativeVideoRequest(
+                        model=model, prompt=prompt, duration_seconds=min(scene.duration_seconds, 5),
+                        aspect_ratio=body.aspect_ratio,
+                        negative_prompt=scene_negative_prompt(aspect_ratio=body.aspect_ratio),
+                    )
+                    generated = hf_generative.generate_video(request)
+                    imported = media.import_file(
+                        project_id, BytesIO(generated.content), f"{scene.id}-wan.mp4", "video/mp4",
+                        request_id=f"{receipt.id}_hf_{scene.id}",
+                        actor=getattr(http_request.state, "actor", "browser"),
+                    )
+                    if imported.asset is None or imported.receipt.status != ReceiptStatus.OBSERVED_SUCCESS:
+                        raise ValueError("HF/fal video failed canonical managed intake")
+                    operations.append({
+                        "kind": "video", "scene_id": scene.id, "request_id": imported.receipt.id,
+                        "provider": "hf_fal", "model": model,
+                        "operation_name": f"hf-bytes:{generated.content_sha256}", "state": "completed",
+                        "asset_id": imported.asset.id, "content_sha256": generated.content_sha256,
+                        "byte_size": generated.byte_size,
+                    })
+                    receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {"operations": _stored_operations()})
+                    continue
                 operation = generative.start_video(GenerativeVideoRequest(
                     model=model,
                     prompt=prompt,
@@ -930,7 +1432,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for item in receipt.payload.get("operations", []):
             asset_id = item.get("asset_id")
             operation = ProviderOperation(
-                request_id=receipt.id, model=str(item["model"]), operation_name=str(item["operation_name"]),
+                request_id=receipt.id, provider=item.get("provider", "google"),
+                model=str(item["model"]), operation_name=str(item["operation_name"]),
                 state="completed" if asset_id else "pending",
             )
             if asset_id:

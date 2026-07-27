@@ -36,6 +36,18 @@ from .models import (
 )
 from .repository import AnalysisArtifactRecord, JobRecord, ModelRunRecord, SuggestionRecord
 from .store import Store
+from .production_intelligence import (
+    ANALYSIS_REVISION_SCHEMA_VERSION,
+    CropPlan,
+    SourceAnalysisRevision,
+    SubjectObservation,
+    SubjectTrack,
+    UsageEvent,
+    UsageReservation,
+    build_clip_quality_score,
+    infer_content_profile,
+    stable_settings_hash,
+)
 
 
 ANALYSIS_SCHEMA = "sag-shorts-analysis-0.1"
@@ -553,13 +565,28 @@ class ShortsService:
         asset = self._source_asset(project, request.asset_id)
         if not asset.sha256 or asset.intake_status != "observed_valid":
             raise ShortsError("short discovery requires an observed-valid source video")
+        job_id = f"job_{uuid4().hex[:16]}"
+        reservation = UsageReservation(
+            id=f"usage_reservation_{job_id}", workspace_id=project.workspace_id or project.id,
+            project_id=project.id, category="provider_call",
+            reserved_quantity=2 if self.ranker else 1, unit="calls", estimated_cost="unknown",
+        )
         frozen = request.model_dump(mode="json")
-        frozen.update({"source_asset_id": asset.id, "source_sha256": asset.sha256})
-        return self.store.create_job(JobRecord(
-            id=f"job_{uuid4().hex[:16]}", project_id=project.id, project_revision=project.revision,
-            kind="shorts.generate", state="queued", progress=0, frozen_spec=frozen,
-            stage="queued", status_message="Waiting for the analysis worker",
-        ))
+        frozen.update({
+            "source_asset_id": asset.id, "source_sha256": asset.sha256,
+            "usage_reservation_id": reservation.id,
+        })
+        with self.store.transaction():
+            self.store.put_editorial_record(
+                record_id=reservation.id, kind="usage_reservation",
+                body=reservation.model_dump(mode="json"), expected_revision=0,
+                project_id=project.id, workspace_id=project.workspace_id or project.id,
+            )
+            return self.store.create_job(JobRecord(
+                id=job_id, project_id=project.id, project_revision=project.revision,
+                kind="shorts.generate", state="queued", progress=0, frozen_spec=frozen,
+                stage="queued", status_message="Waiting for the analysis worker",
+            ))
 
     @staticmethod
     def _source_asset(project: Project, asset_id: str | None) -> Asset:
@@ -592,6 +619,36 @@ class ShortsService:
         project = self.store.get_project_revision(job.project_id, job.project_revision)
         asset = project.asset(str(job.frozen_spec["source_asset_id"]))
         source = self.media_resolver(project, asset.id)
+        provider_calls = 0
+
+        def settle_usage(outcome: str) -> None:
+            reservation_id = str(job.frozen_spec.get("usage_reservation_id") or "")
+            if not reservation_id:
+                return
+            try:
+                reservation = self.store.get_editorial_record(reservation_id, kind="usage_reservation")
+                self.store.put_editorial_record(
+                    record_id=reservation_id, kind="usage_reservation",
+                    body={**reservation, "state": "settled", "outcome": outcome,
+                          "settled_quantity": provider_calls, "cost": "unknown"},
+                    expected_revision=int(reservation.get("revision", 1)), project_id=project.id,
+                    workspace_id=project.workspace_id or project.id,
+                )
+                event = UsageEvent(
+                    id=f"usage_event_{uuid4().hex[:16]}", reservation_id=reservation_id,
+                    workspace_id=project.workspace_id or project.id, project_id=project.id,
+                    category="provider_call", quantity=provider_calls, unit="calls", cost="unknown",
+                    provider={"transcription": self.transcriber.id,
+                              "ranking": getattr(self.ranker, "id", None), "outcome": outcome},
+                )
+                self.store.put_editorial_record(
+                    record_id=event.id, kind="usage_event", body=event.model_dump(mode="json"),
+                    expected_revision=0, project_id=project.id,
+                    workspace_id=project.workspace_id or project.id, append_only=True,
+                )
+            except (KeyError, ValueError):
+                # Usage settlement must not obscure the canonical job outcome.
+                return
 
         def progress(stage: str, value: float, message: str) -> None:
             current = self.store.get_job(job.id)
@@ -615,6 +672,7 @@ class ShortsService:
                     transcript = transcript_artifact.body
                 else:
                     progress("transcription", .18, "Transcribing with word timestamps")
+                    provider_calls += 1
                     transcript_run = self.store.create_model_run(ModelRunRecord(
                         id=f"run_{uuid4().hex[:16]}",project_id=project.id,provider_id=self.transcriber.id,
                         model_id=str(getattr(self.transcriber,"model",self.transcriber.id)),purpose="shorts.transcription",
@@ -664,12 +722,97 @@ class ShortsService:
                     schema_version=ANALYSIS_SCHEMA,provider_id="ffmpeg",provider_version="1",
                     settings_hash=feature_hash,body=features,
                 ))
+            profile = infer_content_profile(features)
+            proxy_hash = None
+            if asset.proxy_asset_id:
+                try:
+                    proxy_hash = project.asset(asset.proxy_asset_id).sha256
+                except KeyError:
+                    features.setdefault("warnings", []).append(
+                        "The recorded proxy identity is unavailable; crop plans remain normalized to the source"
+                    )
+            observations = []
+            for point in features.get("face_tracks", []):
+                center_x = float(point.get("center_x", .5))
+                center_y = float(point.get("center_y", .5))
+                width = .3
+                height = .3
+                observations.append(SubjectObservation.model_validate({
+                    "time_ticks": int(point.get("time_ticks", 0)),
+                    "box": {
+                        "x": max(0, min(1 - width, center_x - width / 2)),
+                        "y": max(0, min(1 - height, center_y - height / 2)),
+                        "width": width, "height": height,
+                    },
+                    "confidence": float(point.get("confidence") or 0),
+                }))
+            subject_tracks = ([SubjectTrack(
+                id="dominant_face", kind="face", observations=observations,
+                confidence=sum(item.confidence for item in observations) / max(1, len(observations)),
+                provenance={"provider": "mediapipe", "coordinates": "normalized_source_frame"},
+            )] if observations else [])
+            crop_points = [
+                {
+                    "time_ticks": int(point.get("time_ticks", 0)),
+                    "center_x": float(point.get("center_x", .5)),
+                    "center_y": float(point.get("center_y", .5)),
+                    "zoom": float(point.get("zoom", 1)),
+                    "confidence": float(point.get("confidence") or 0),
+                }
+                for point in features.get("face_tracks", [])
+            ] or [
+                {"time_ticks": 0, "center_x": .5, "center_y": .5, "zoom": 1, "confidence": 0},
+                {"time_ticks": int(asset.duration_ticks or project.duration_ticks), "center_x": .5,
+                 "center_y": .5, "zoom": 1, "confidence": 0},
+            ]
+            crop_strategy = (
+                "stable_split" if profile == "multi_speaker"
+                else "dominant_face" if observations else "center_fallback"
+            )
+            revision_settings = {
+                "source_asset_hash": asset.sha256,
+                "proxy_hash": proxy_hash,
+                "transcription_provider": self.transcriber.id,
+                "transcription_version": self.transcriber.version,
+                "analysis_profile": profile,
+                "transcript_settings_hash": settings_hash,
+                "feature_settings_hash": feature_hash,
+            }
+            aggregate_hash = stable_settings_hash(revision_settings)
+            analysis_revision = SourceAnalysisRevision(
+                id=f"analysis_revision_{aggregate_hash[:16]}", project_id=project.id,
+                source_revision=project.revision, source_asset_id=asset.id,
+                source_asset_hash=asset.sha256 or "", proxy_hash=proxy_hash,
+                transcription_provider=self.transcriber.id,
+                transcription_version=self.transcriber.version, analysis_profile=profile,
+                settings_hash=aggregate_hash, transcript_artifact_id=transcript_artifact.id,
+                feature_artifact_id=feature_artifact.id, subject_tracks=subject_tracks,
+                crop_plans=[CropPlan(
+                    id=f"crop_{aggregate_hash[:12]}_9_16", aspect_ratio="9:16",
+                    strategy=crop_strategy, points=crop_points,
+                    confidence=(subject_tracks[0].confidence if subject_tracks else 0),
+                    provenance={"coordinates": "normalized_source_frame", "smoothing": "ema_0.22_deadzone_0.025"},
+                    warnings=list(features.get("warnings") or []),
+                )],
+                provider_identity={
+                    "transcription": {"id": self.transcriber.id, "version": self.transcriber.version},
+                    "features": {"id": "ffmpeg_mediapipe", "version": "1"},
+                }, warnings=list(features.get("warnings") or []),
+            )
+            analysis_revision_artifact = self.store.put_analysis_artifact(AnalysisArtifactRecord(
+                id=analysis_revision.id, project_id=project.id, source_revision=project.revision,
+                source_asset_id=asset.id, source_sha256=asset.sha256 or "",
+                kind="source_analysis_revision", schema_version=ANALYSIS_REVISION_SCHEMA_VERSION,
+                provider_id="sag_analysis", provider_version="1", settings_hash=aggregate_hash,
+                body=analysis_revision.model_dump(mode="json"),
+            ))
             progress("candidates", .70, "Building boundary-aligned clip candidates")
             candidates = _candidate_windows(transcript, features, request)
             if not candidates:
                 raise ShortsError("no speech segment satisfies the configured 15–90 second duration range")
             if self.ranker:
                 progress("ranking", .82, "Ranking candidate clips")
+                provider_calls += 1
                 ranking_run = self.store.create_model_run(ModelRunRecord(
                     id=f"run_{uuid4().hex[:16]}",project_id=project.id,provider_id=self.ranker.id,
                     model_id=str(getattr(self.ranker,"model",self.ranker.id)),purpose="shorts.ranking",
@@ -745,6 +888,25 @@ class ShortsService:
                     )]
                 evidence = {
                     **candidate,
+                    "analysis_revision_id": analysis_revision_artifact.id,
+                    "clip_quality_score": build_clip_quality_score(
+                        candidate["score_components"], content_profile=profile,
+                        evidence={
+                            "hook": ["Opening transcript language"],
+                            "flow": ["Sentence completion and speech continuity"],
+                            "value": ["Explanatory and outcome language"],
+                            "delivery": ["Word-timed speech density"],
+                            "visual_evidence": ["Shot boundaries and normalized subject tracking"],
+                            "boundary_quality": ["Word and sentence aligned range boundaries"],
+                        },
+                        confidence=.82 if transcript.get("words") else .45,
+                        warnings=list(features.get("warnings") or []),
+                        provider_identity={
+                            "id": getattr(self.ranker, "id", "sag_deterministic"),
+                            "version": getattr(self.ranker, "version", "1"),
+                            "model": getattr(self.ranker, "model", None),
+                        },
+                    ).model_dump(mode="json"),
                     "transcript_artifact_id": transcript_artifact.id,
                     "feature_artifact_id": feature_artifact.id,
                     "source_asset_id": asset.id,
@@ -770,10 +932,13 @@ class ShortsService:
                 ))
                 created += 1
             self.store.update_job(job.id,state="observed_success",progress=1,stage="complete",status_message=f"Created {created} ranked drafts")
+            settle_usage("observed_success")
         except AnalysisCancelled:
             self.store.update_job(job.id,state="cancelled",stage="cancelled",status_message="Analysis cancelled")
+            settle_usage("cancelled")
         except Exception as error:
             self.store.update_job(job.id,state="execution_failed",error_code="shorts_analysis_failed",error_detail=str(error),stage="failed",status_message=str(error))
+            settle_usage("execution_failed")
 
     def accept(self, suggestion_id: str, request_id: str, actor: str, name: str | None = None) -> tuple[Project, Receipt]:
         suggestion = self.store.get_suggestion(suggestion_id)

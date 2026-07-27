@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
 import { engineHeaders, sagEngineUrl } from '@/lib/engine';
 import { apiError } from '@/lib/http';
 import { requireWorkspace } from '@/lib/workspace';
+import { studioTarget } from '@/lib/studio-target';
 
 export async function GET(
   request: Request,
@@ -11,8 +11,7 @@ export async function GET(
   try {
     const { workspaceId } = await requireWorkspace();
     const { id, assetId, kind } = await params;
-    const project = await db.project.findFirst({ where: { id, workspaceId } });
-    if (!project?.engineProjectId) return NextResponse.json({ error: 'project_not_found' }, { status: 404 });
+    const { sequence } = await studioTarget(id, workspaceId, new URL(request.url).searchParams.get('sequence_id'));
     if (!['content', 'proxy', 'thumbnail'].includes(kind)) {
       return NextResponse.json({ error: 'invalid_asset_representation' }, { status: 422 });
     }
@@ -20,7 +19,7 @@ export async function GET(
     const range = request.headers.get('range');
     if (range) upstreamHeaders.set('range', range);
     const upstream = await fetch(
-      `${sagEngineUrl()}/api/projects/${encodeURIComponent(project.engineProjectId)}/assets/${encodeURIComponent(assetId)}/${kind}`,
+      `${sagEngineUrl()}/api/projects/${encodeURIComponent(sequence.engineProjectId)}/assets/${encodeURIComponent(assetId)}/${kind}`,
       { headers: upstreamHeaders, cache: 'no-store' },
     );
     if (!upstream.ok || !upstream.body) {

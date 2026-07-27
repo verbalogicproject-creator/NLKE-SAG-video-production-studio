@@ -100,7 +100,7 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
     if contract.expect_audio and audio:
         loudness = _run([
             "ffmpeg", "-nostdin", "-i", str(artifact), "-filter_complex",
-            "ebur128=framelog=verbose", "-f", "null", "-",
+            "ebur128=peak=true:framelog=verbose", "-f", "null", "-",
         ], timeout=60)
         matches = re.findall(rb"I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", loudness.stderr)
         integrated = float(matches[-1]) if matches else None
@@ -109,6 +109,14 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
             code="integrated_loudness", passed=loudness_passed,
             summary="Integrated loudness is inside the delivery range" if loudness_passed else "Integrated loudness is missing or outside the delivery range",
             evidence={"integrated_lufs": integrated, "minimum_lufs": -19.0, "maximum_lufs": -13.0},
+        ))
+        peak_matches = re.findall(rb"Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS", loudness.stderr)
+        true_peak = float(peak_matches[-1]) if peak_matches else None
+        peak_passed = true_peak is not None and true_peak <= -1.0
+        findings.append(ObservationFinding(
+            code="true_peak", passed=peak_passed,
+            summary="True peak is inside the delivery ceiling" if peak_passed else "True peak is missing or exceeds the delivery ceiling",
+            evidence={"true_peak_dbfs": true_peak, "maximum_dbfs": -1.0},
         ))
 
     observed_duration = float(metadata.get("format", {}).get("duration", 0))
@@ -169,20 +177,33 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
     if contract.title_id is None or contract.marker_rgb is None:
         return ObservationResult(passed=all(finding.passed for finding in findings), findings=findings)
     expected = contract.marker_rgb
+    if contract.title_bounds:
+        title_x, title_y, title_width, title_height = contract.title_bounds
+        sample_bounds = (
+            max(0, title_x), max(0, title_y),
+            min(image.width, title_x + title_width), min(image.height, title_y + title_height),
+        )
+    else:
+        sample_bounds = (0, 0, image.width, image.height)
     points: list[tuple[int, int]] = []
-    for y in range(image.height):
-        for x in range(image.width):
+    for y in range(sample_bounds[1], sample_bounds[3]):
+        for x in range(sample_bounds[0], sample_bounds[2]):
             red, green, blue = image.getpixel((x, y))
             if all(abs(observed - wanted) <= 55 for observed, wanted in zip((red, green, blue), expected)):
                 points.append((x, y))
 
-    marker_found = len(points) >= 100
+    sample_area = max(0, sample_bounds[2] - sample_bounds[0]) * max(0, sample_bounds[3] - sample_bounds[1])
+    minimum_marker_pixels = max(100, round(sample_area * .25)) if contract.title_bounds else 100
+    marker_found = len(points) >= minimum_marker_pixels
     findings.append(
         ObservationFinding(
             code="title_marker_visible",
             passed=marker_found,
             summary="Expected title plate is visible in the encoded frame" if marker_found else "Expected title plate was not detected in the encoded frame",
-            evidence={"matching_pixels": len(points), "title_id": contract.title_id},
+            evidence={
+                "matching_pixels": len(points), "minimum_marker_pixels": minimum_marker_pixels,
+                "sample_bounds": sample_bounds, "title_id": contract.title_id,
+            },
         )
     )
     if marker_found:
@@ -195,7 +216,23 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
             "right": contract.width - contract.safe_margin_x - 1,
             "bottom": contract.height - contract.safe_margin_y - 1,
         }
+        declared = None
+        declared_inside = True
+        if contract.title_bounds:
+            title_x, title_y, title_width, title_height = contract.title_bounds
+            declared = {
+                "left": title_x, "top": title_y,
+                "right": title_x + title_width - 1, "bottom": title_y + title_height - 1,
+            }
+            declared_inside = (
+                declared["left"] >= safe["left"]
+                and declared["top"] >= safe["top"]
+                and declared["right"] <= safe["right"]
+                and declared["bottom"] <= safe["bottom"]
+            )
         inside = (
+            declared_inside
+            and
             bounds["left"] >= safe["left"]
             and bounds["top"] >= safe["top"]
             and bounds["right"] <= safe["right"]
@@ -206,7 +243,11 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
                 code="title_safe_area",
                 passed=inside,
                 summary="Observed title is inside the safe area" if inside else "Observed title is clipped or outside the safe area",
-                evidence={"observed_bounds": bounds, "safe_bounds": safe, "source": "decoded_output_frame"},
+                evidence={
+                    "declared_bounds": declared, "observed_bounds": bounds,
+                    "safe_bounds": safe, "sample_bounds": sample_bounds,
+                    "source": "decoded_output_frame",
+                },
             )
         )
 

@@ -1,6 +1,6 @@
 import pytest
 
-from sag_video.generative import GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter, ProviderOperation, _SdkClient, _inline_json_schema, _media_output, _text_output
+from sag_video.generative import GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter, HFInferenceVideoAdapter, ProviderOperation, _SdkClient, _inline_json_schema, _media_output, _text_output
 from sag_video.repo_to_video import RepoStoryboard
 
 
@@ -58,6 +58,31 @@ def test_provider_quota_failure_is_classified_without_leaking_full_detail():
 def test_music_model_is_not_accepted_as_video():
     with pytest.raises(ValueError, match="does not support"):
         GoogleGenerativeAdapter(client=FakeClient()).start_video(GenerativeVideoRequest(prompt="test", model="lyria-3-clip-preview"))
+
+
+def test_hf_fal_returns_bytes_with_hash_and_never_serializes_content():
+    class HFClient:
+        def text_to_video(self, prompt, *, model):
+            assert prompt == "abstract evidence graph"
+            assert model == "Wan-AI/Wan2.2-TI2V-5B"
+            return b"video-bytes"
+
+    result = HFInferenceVideoAdapter(client=HFClient()).generate_video(GenerativeVideoRequest(
+        model="Wan-AI/Wan2.2-TI2V-5B", prompt="abstract evidence graph",
+        duration_seconds=5, aspect_ratio="9:16",
+    ))
+    assert result.content == b"video-bytes"
+    assert result.byte_size == 11
+    assert "content" not in result.model_dump(mode="json")
+
+
+def test_hf_fal_fails_closed_without_credentials(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    adapter = HFInferenceVideoAdapter(token="")
+    with pytest.raises(RuntimeError, match="not configured"):
+        adapter.generate_video(GenerativeVideoRequest(
+            model="Wan-AI/Wan2.2-TI2V-5B", prompt="test", duration_seconds=5,
+        ))
 
 
 class SdkValue:

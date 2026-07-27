@@ -21,6 +21,7 @@ from .repository import (
     ModelRunRecord,
     SuggestionRecord,
 )
+from .production import ProductionSession
 
 
 def fixture_project() -> Project:
@@ -253,6 +254,60 @@ class Store:
     def put_project(self, project: Project) -> None:
         with self._write():
             write_project_snapshot(self._connection, project)
+
+    def get_production_session(self, project_id: str) -> ProductionSession:
+        """Return the durable Studio workflow cursor or an unsaved default."""
+        with self._lock:
+            self.get_project(project_id)
+            row = self._connection.execute(
+                "SELECT body_json FROM production_sessions WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            if row is None:
+                return ProductionSession(project_id=project_id)
+            return ProductionSession.model_validate_json(row["body_json"])
+
+    def put_production_session(
+        self, project_id: str, *, expected_revision: int, patch: dict[str, Any],
+    ) -> ProductionSession:
+        """Apply one optimistic production-context update without editing media."""
+        with self.transaction():
+            self.get_project_for_update(project_id)
+            row = self._connection.execute(
+                "SELECT revision,body_json FROM production_sessions WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            current = (
+                ProductionSession.model_validate_json(row["body_json"])
+                if row is not None else ProductionSession(project_id=project_id)
+            )
+            if current.revision != expected_revision:
+                raise ValueError(
+                    f"stale production session: expected {expected_revision}, current {current.revision}"
+                )
+            next_payload = current.model_dump(mode="json")
+            next_payload.update(patch)
+            next_payload.update({
+                "project_id": project_id,
+                "revision": current.revision + 1,
+                "updated_at": utc_now(),
+            })
+            next_session = ProductionSession.model_validate(next_payload)
+            encoded = next_session.model_dump_json()
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO production_sessions(project_id,revision,body_json,updated_at) VALUES (?,?,?,?)",
+                    (project_id, next_session.revision, encoded, next_session.updated_at),
+                )
+            else:
+                updated = self._connection.execute(
+                    """UPDATE production_sessions SET revision=?,body_json=?,updated_at=?
+                       WHERE project_id=? AND revision=?""",
+                    (next_session.revision, encoded, next_session.updated_at, project_id, expected_revision),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("production session changed during update")
+            return next_session
 
     def get_selection(self, project_id: str) -> list[str]:
         with self._lock:
@@ -1359,6 +1414,100 @@ class Store:
                 (source_sha256,kind,schema_version,provider_id,provider_version,settings_hash),
             ).fetchone()
             return self._analysis_artifact_record(row) if row else None
+
+    def get_analysis_artifact(self, analysis_id: str) -> AnalysisArtifactRecord:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM analysis_artifacts WHERE id=?", (analysis_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(analysis_id)
+            return self._analysis_artifact_record(row)
+
+    def list_analysis_artifacts(
+        self, project_id: str, *, kind: str | None = None,
+    ) -> list[AnalysisArtifactRecord]:
+        with self._lock:
+            sql = "SELECT * FROM analysis_artifacts WHERE project_id=?"
+            values: list[Any] = [project_id]
+            if kind is not None:
+                sql += " AND kind=?"
+                values.append(kind)
+            sql += " ORDER BY created_at DESC,id"
+            return [
+                self._analysis_artifact_record(row)
+                for row in self._connection.execute(sql, values).fetchall()
+            ]
+
+    def put_editorial_record(
+        self, *, record_id: str, kind: str, body: dict[str, Any], expected_revision: int,
+        project_id: str | None = None, workspace_id: str | None = None, append_only: bool = False,
+    ) -> dict[str, Any]:
+        """Create or optimistically update a typed JSON editorial record."""
+        now = utc_now()
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT kind,revision,body_json FROM editorial_records WHERE id=?", (record_id,),
+            ).fetchone()
+            if row is None:
+                if expected_revision != 0:
+                    raise ValueError(f"editorial record does not exist; expected revision {expected_revision}")
+                revision = 1
+                payload = {**body, "id": record_id, "revision": revision}
+                self._connection.execute(
+                    """INSERT INTO editorial_records(
+                         id,project_id,workspace_id,kind,revision,body_json,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?,?)""",
+                    (record_id, project_id, workspace_id, kind, revision,
+                     json.dumps(payload, sort_keys=True), now, now),
+                )
+                return payload
+            if str(row["kind"]) != kind:
+                raise ValueError(f"editorial record {record_id} belongs to {row['kind']}")
+            current_revision = int(row["revision"])
+            if append_only:
+                raise ValueError(f"append-only editorial record already exists: {record_id}")
+            if current_revision != expected_revision:
+                raise ValueError(
+                    f"stale editorial record: expected {expected_revision}, current {current_revision}"
+                )
+            revision = current_revision + 1
+            payload = {**body, "id": record_id, "revision": revision}
+            changed = self._connection.execute(
+                """UPDATE editorial_records SET project_id=?,workspace_id=?,revision=?,body_json=?,updated_at=?
+                   WHERE id=? AND revision=?""",
+                (project_id, workspace_id, revision, json.dumps(payload, sort_keys=True),
+                 now, record_id, expected_revision),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("editorial record changed during update")
+            return payload
+
+    def get_editorial_record(self, record_id: str, *, kind: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT kind,body_json FROM editorial_records WHERE id=?", (record_id,),
+            ).fetchone()
+            if row is None or (kind is not None and str(row["kind"]) != kind):
+                raise KeyError(record_id)
+            return json.loads(row["body_json"])
+
+    def list_editorial_records(
+        self, *, kind: str, project_id: str | None = None, workspace_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if project_id is None and workspace_id is None:
+            raise ValueError("project_id or workspace_id is required")
+        with self._lock:
+            sql = "SELECT body_json FROM editorial_records WHERE kind=?"
+            values: list[Any] = [kind]
+            if project_id is not None:
+                sql += " AND project_id=?"
+                values.append(project_id)
+            if workspace_id is not None:
+                sql += " AND workspace_id=?"
+                values.append(workspace_id)
+            sql += " ORDER BY updated_at DESC,id"
+            return [json.loads(row["body_json"]) for row in self._connection.execute(sql, values).fetchall()]
 
     @staticmethod
     def _suggestion_record(row: sqlite3.Row) -> SuggestionRecord:

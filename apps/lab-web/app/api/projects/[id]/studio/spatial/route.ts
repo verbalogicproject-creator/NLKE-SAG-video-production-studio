@@ -8,9 +8,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   try {
     const { workspaceId } = await requireWorkspace();
     const { id } = await params;
-    const engineProjectId = await studioEngineProject(id, workspaceId);
     const query = new URL(request.url).searchParams;
-    return NextResponse.json(await sagEngine.spatialSnapshot(workspaceId, engineProjectId, {
+    return NextResponse.json(await sagEngine.spatialSnapshot(workspaceId, await studioEngineProject(id, workspaceId, query.get('sequence_id')), {
       focusId: query.get('focus_id'), depth: query.get('depth') ?? 'context',
       hopCount: Number(query.get('hop_count') ?? 2),
     }));
@@ -23,7 +22,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const { workspaceId } = await requireWorkspace();
     const { id } = await params;
-    await studioEngineProject(id, workspaceId);
     const body = await request.json();
     if (body.operation !== 'ack') return NextResponse.json({ error: 'unsupported_spatial_operation' }, { status: 422 });
     return NextResponse.json(await sagEngine.acknowledgeSpatialDirective(

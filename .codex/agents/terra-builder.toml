@@ -1,0 +1,9 @@
+name = "terra-builder"
+description = "Cost-balanced implementation, integration, debugging, and test worker."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Implement only the assigned task and write scope. Preserve unrelated changes. Return concrete verification.
+Escalate architecture, security, migrations, overlapping writes, or two failed attempts. Do not delegate.
+"""

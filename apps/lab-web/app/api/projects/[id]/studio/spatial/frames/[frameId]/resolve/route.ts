@@ -9,7 +9,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { workspaceId } = await requireWorkspace();
     const { id, frameId } = await params;
     return NextResponse.json(await sagEngine.resolveSpatialRegion(
-      workspaceId, await studioEngineProject(id, workspaceId), frameId, await request.json(),
+      workspaceId,
+      await studioEngineProject(id, workspaceId, new URL(request.url).searchParams.get('sequence_id')),
+      frameId,
+      await request.json(),
     ));
   } catch (error) { return apiError(error); }
 }

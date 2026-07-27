@@ -69,7 +69,7 @@ class GenerativeAudioRequest(BaseModel):
 
 class ProviderOperation(BaseModel):
     request_id: str
-    provider: Literal["google"] = "google"
+    provider: Literal["google", "hf_fal"] = "google"
     model: str
     operation_name: str
     state: Literal["pending", "running", "completed", "failed"] = "pending"
@@ -77,6 +77,57 @@ class ProviderOperation(BaseModel):
     error_code: str | None = None
     error_detail: str | None = None
     output: dict[str, Any] | None = None
+
+
+class HFVideoGenerationResult(BaseModel):
+    model: str
+    provider: Literal["hf_fal"] = "hf_fal"
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_size: int = Field(gt=0)
+    mime_type: Literal["video/mp4"] = "video/mp4"
+    content: bytes = Field(exclude=True, repr=False)
+
+
+class HFInferenceVideoAdapter:
+    """Synchronous HF routed-inference boundary returning bytes, never URLs or base64."""
+
+    def __init__(self, client: Any | None = None, *, token: str | None = None):
+        self.client = client
+        self.token = token if token is not None else (os.getenv("HF_TOKEN") or _local_env_value("HF_TOKEN"))
+
+    def _client(self) -> Any:
+        if self.client is not None:
+            return self.client
+        if not self.token:
+            raise RuntimeError("HF routed inference is not configured")
+        try:
+            from huggingface_hub import InferenceClient
+        except ImportError as error:
+            raise RuntimeError("huggingface-hub is required for HF video generation") from error
+        self.client = InferenceClient(provider="fal-ai", api_key=self.token)
+        return self.client
+
+    def generate_video(self, request: GenerativeVideoRequest) -> HFVideoGenerationResult:
+        descriptor = validate_model_for(request.model, "video_generation")
+        if descriptor.provider != "hf_fal":
+            raise ValueError(f"model {request.model} is not an HF/fal model")
+        if request.model == "Wan-AI/Wan2.2-TI2V-5B" and request.duration_seconds > 5:
+            raise ValueError("Wan 2.2 acceptance clips are limited to five seconds")
+        client = self._client()
+        try:
+            content = client.text_to_video(request.prompt, model=request.model)
+        except Exception as error:
+            detail = str(error).lower()
+            if "429" in detail or "quota" in detail or "rate limit" in detail:
+                raise RuntimeError("quota_failure: HF routed inference is exhausted or rate-limited") from error
+            raise RuntimeError("provider_failure: HF/fal video generation failed") from error
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            raise RuntimeError("provider_failure: HF/fal returned no video bytes")
+        payload = bytes(content)
+        return HFVideoGenerationResult(
+            model=request.model, content_sha256=hashlib.sha256(payload).hexdigest(),
+            byte_size=len(payload), content=payload,
+        )
 
 
 class GoogleProviderClient(Protocol):

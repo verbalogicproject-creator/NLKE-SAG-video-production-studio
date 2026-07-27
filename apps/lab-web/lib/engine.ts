@@ -49,7 +49,7 @@ export type Storyboard = {
 };
 
 export type EngineReceipt = {
-  id: string; command: string; status: string; actor: string; project_revision: number;
+  id: string; project_id?: string; command: string; status: string; actor: string; project_revision: number;
   created_at: string; updated_at?: string; payload?: Record<string, unknown>;
 };
 
@@ -73,6 +73,40 @@ export type PromptStudioPreview = {
     id: string; provider: string; family: string; lifecycle: string; capabilities: string[];
     input_modalities: string[]; output_modalities: string[]; default_for: string[]; notes: string;
   }>;
+};
+
+export type ProductionStage = 'director' | 'scenes' | 'edit' | 'finish' | 'review' | 'deliver';
+export type WorkflowMode = 'repo_to_video' | 'source_to_shorts';
+export type IntakeStage = 'evidence' | 'brief' | 'storyboard' | 'keyframes' | 'source' | 'analysis' | 'ranked_clips' | 'reframe';
+
+export type ProductionSession = {
+  schema_version: 'sag-production-session/1.0'; project_id: string; revision: number;
+  workflow_mode: WorkflowMode; current_stage: ProductionStage; intake_stage: IntakeStage;
+  active_depth: 'edit' | 'context' | 'system';
+  director_tab: 'direction' | 'brief' | 'prompts' | 'storyboard' | 'queue';
+  focused_entity_id?: string | null; focused_candidate_id?: string | null;
+  active_analysis_revision_id?: string | null; active_generation_revision_id?: string | null;
+  active_variant_id?: string | null; review_context: Record<string, unknown>;
+  director_input?: DirectorInput | null;
+  repository_evidence?: RepositoryEvidence | null; evidence_revision?: string | null;
+  active_brief?: CreativeBrief | null; brief_versions: CreativeBrief[]; brief_approved: boolean;
+  active_storyboard?: Storyboard | null; storyboard_proposal_receipt_id?: string | null;
+  approved_storyboard_receipt_id?: string | null; active_prompt_revision_id?: string | null;
+  prompt_revisions: Array<Record<string, unknown>>;
+  generation_plan?: Record<string, unknown> | null; generation_receipt_id?: string | null;
+  scene_decisions: Record<string, Record<string, unknown>>;
+  variants: Record<string, Record<string, unknown>>; operation_ids: string[];
+  generation_operations: Array<Record<string, unknown>>; updated_at: string;
+};
+
+export type ScreenshotCaptureRecord = {
+  id: string; project_id: string; recipe_id: string; recipe_sha256: string;
+  family_id: string; asset_id: string; asset_sha256: string;
+  adapter: 'android_screenshot' | 'browser_mediarecorder' | 'playwright';
+  checkpoint_id: string; observed_labels: string[];
+  sensitive_content_status: 'passed'; source_commit: string; application_revision: string;
+  evidence_claim_ids: string[]; approval_state: 'pending' | 'approved' | 'rejected';
+  captured_at: string; stale: boolean;
 };
 
 const baseUrl = () => (process.env.SAG_ENGINE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
@@ -107,12 +141,32 @@ async function engineFetch<T>(workspaceId: string, path: string, init: RequestIn
   });
   const body = await response.json().catch(() => ({ detail: response.statusText }));
   if (!response.ok) {
-    const error = new Error(String(body.detail ?? 'SAG engine request failed')) as Error & { code?: string; status?: number };
+    const error = new Error(apiMessage(body, 'SAG engine request failed')) as Error & { code?: string; status?: number };
     error.code = body.code;
     error.status = response.status;
     throw error;
   }
   return body as T;
+}
+
+function apiMessage(body: unknown, fallback: string): string {
+  if (!body || typeof body !== 'object') return fallback;
+  const value = body as Record<string, unknown>;
+  for (const key of ['message', 'detail', 'error']) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+    if (Array.isArray(candidate)) {
+      const messages = candidate.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object') return [];
+        const issue = entry as Record<string, unknown>;
+        const location = Array.isArray(issue.loc) ? issue.loc.filter((part) => part !== 'body').join('.') : '';
+        const message = typeof issue.msg === 'string' ? issue.msg : '';
+        return message ? [`${location ? `${location}: ` : ''}${message}`] : [];
+      });
+      if (messages.length) return messages.join('; ');
+    }
+  }
+  return fallback;
 }
 
 export const sagEngine = {
@@ -168,9 +222,9 @@ export const sagEngine = {
   }>(workspaceId, `/api/projects/${projectId}/renders`, {
     method: 'POST', body: JSON.stringify({ project_revision: revision, request_id: requestId, actor: 'verbalogix-orchestrator' }),
   }),
-  receipt: (workspaceId: string, receiptId: string) => engineFetch<Record<string, unknown>>(workspaceId, `/api/receipts/${receiptId}`),
+  receipt: (workspaceId: string, receiptId: string) => engineFetch<EngineReceipt>(workspaceId, `/api/receipts/${receiptId}`),
   artifact: (workspaceId: string, artifactId: string) => engineFetch<{
-    id: string; managed_uri: string; sha256: string; byte_size: number; mime_type: string | null; provenance: Record<string, unknown>;
+    id: string; project_id: string; managed_uri: string; sha256: string; byte_size: number; mime_type: string | null; provenance: Record<string, unknown>;
   }>(workspaceId, `/api/artifacts/${artifactId}`),
   cancel: (workspaceId: string, jobId: string) => engineFetch<EngineJob>(workspaceId, `/api/jobs/${jobId}/cancel`, { method: 'POST' }),
   command: (workspaceId: string, projectId: string, command: string, arguments_: Record<string, unknown>, expectedRevision: number, requestId: string, confirmationId?: string) =>
@@ -187,7 +241,7 @@ export const sagEngine = {
   activeCommands: (workspaceId: string, projectId: string) => engineFetch<Record<string, unknown>>(
     workspaceId, `/api/projects/${projectId}/commands/active`,
   ),
-  receipts: (workspaceId: string, projectId: string) => engineFetch<Record<string, unknown>>(
+  receipts: (workspaceId: string, projectId: string) => engineFetch<EngineReceipt[]>(
     workspaceId, `/api/projects/${projectId}/receipts`,
   ),
   propose: (workspaceId: string, projectId: string, commands: Array<{ command: string; arguments: Record<string, unknown> }>, expectedRevision: number) =>
@@ -351,6 +405,29 @@ export const sagEngine = {
   }) => engineFetch<PromptStudioPreview>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/prompts/preview`, {
     method: 'POST', body: JSON.stringify(request),
   }),
+  productionSession: (workspaceId: string, projectId: string) =>
+    engineFetch<{ production: ProductionSession }>(
+      workspaceId, `/api/projects/${encodeURIComponent(projectId)}/production`,
+    ),
+  updateProductionSession: (
+    workspaceId: string, projectId: string, request: Record<string, unknown>,
+  ) => engineFetch<{ production: ProductionSession }>(
+    workspaceId, `/api/projects/${encodeURIComponent(projectId)}/production`, {
+      method: 'PUT', body: JSON.stringify(request),
+    },
+  ),
+  screenshotCaptures: (workspaceId: string, projectId: string) =>
+    engineFetch<{ captures: ScreenshotCaptureRecord[] }>(
+      workspaceId, `/api/projects/${encodeURIComponent(projectId)}/screenshot-captures`,
+    ),
+  decideScreenshotCapture: (
+    workspaceId: string, projectId: string, captureId: string,
+    request: { decision: 'approved' | 'rejected'; actor: string; note?: string },
+  ) => engineFetch<{ capture: ScreenshotCaptureRecord }>(
+    workspaceId,
+    `/api/projects/${encodeURIComponent(projectId)}/screenshot-captures/${encodeURIComponent(captureId)}/decisions`,
+    { method: 'POST', body: JSON.stringify(request) },
+  ),
   commitRepoToVideoStoryboard: (workspaceId: string, projectId: string, request: { receipt_id: string; expected_revision: number; confirmation_id: string; storyboard: Storyboard }) =>
     engineFetch<{ receipt: EngineReceipt; idempotent?: boolean }>(workspaceId, `/api/projects/${encodeURIComponent(projectId)}/repo-to-video/storyboard/commit`, {
       method: 'POST', body: JSON.stringify(request), headers: { 'x-sag-human-confirmation': request.confirmation_id },

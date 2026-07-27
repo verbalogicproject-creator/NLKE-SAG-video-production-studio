@@ -47,6 +47,29 @@ def test_unknown_command_fails_closed(client):
     assert response.json()["payload"]["reason"] == "unknown or undeclared command"
 
 
+def test_project_rename_is_revisioned_and_validated(client):
+    renamed = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "project.rename", {"name": "SAG Repository Proof"},
+            request_id="project-rename-0001",
+        ),
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["project_revision"] == 2
+    assert client.get("/api/projects/demo").json()["project"]["name"] == "SAG Repository Proof"
+
+    blank = client.post(
+        "/api/projects/demo/commands",
+        json=command_body(
+            "project.rename", {"name": "   "}, revision=2,
+            request_id="project-rename-0002",
+        ),
+    )
+    assert blank.status_code == 422
+    assert "cannot be blank" in blank.json()["detail"]
+
+
 def test_undo_creates_compensating_revision(client):
     moved = client.post(
         "/api/projects/demo/commands",

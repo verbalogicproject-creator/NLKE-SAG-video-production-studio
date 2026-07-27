@@ -188,6 +188,7 @@ class StoryboardScene(BaseModel):
     evidence_refs: list[str] = Field(min_length=1, max_length=20)
     generation_model: Literal[
         "gemini-omni-flash-preview", "veo-3.1-generate-preview", "veo-3.1-lite-generate-preview",
+        "Wan-AI/Wan2.2-TI2V-5B",
     ] = "gemini-omni-flash-preview"
     spatial_layout: SceneSpatialLayout | None = None
 

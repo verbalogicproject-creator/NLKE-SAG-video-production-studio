@@ -21,13 +21,14 @@ export default async function StudioPage({ params }: { params: Promise<{ id: str
   });
   const sequence = controlProject?.sequences[0];
   if (!controlProject || !sequence) notFound();
-  const [project, context, catalog, receipts, spatial, delivery] = await Promise.all([
+  const [project, context, catalog, receipts, spatial, delivery, production] = await Promise.all([
     sagEngine.project(workspaceId, sequence.engineProjectId),
     sagEngine.context(workspaceId, sequence.engineProjectId),
     sagEngine.activeCommands(workspaceId, sequence.engineProjectId),
     sagEngine.receipts(workspaceId, sequence.engineProjectId),
     sagEngine.spatialSnapshot(workspaceId, sequence.engineProjectId, { depth: 'context' }),
     sagEngine.deliveryState(workspaceId, sequence.engineProjectId),
+    sagEngine.productionSession(workspaceId, sequence.engineProjectId),
   ]);
   return <Studio
     controlProject={jsonSafe(controlProject) as any}
@@ -37,5 +38,6 @@ export default async function StudioPage({ params }: { params: Promise<{ id: str
     initialReceipts={(receipts as any).receipts ?? receipts}
     initialSpatial={spatial as any}
     initialDelivery={delivery as any}
+    initialProduction={production.production}
   />;
 }

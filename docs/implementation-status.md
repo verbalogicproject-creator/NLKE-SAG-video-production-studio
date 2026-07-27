@@ -1,13 +1,42 @@
 # Implementation status
 
-Updated: July 26, 2026
+Updated: July 27, 2026
 
-Implementation is currently frozen at Dogfood Pause 0: connected production
-control surface. The approved pause criteria, exit evidence, and ordered future
-gates are recorded in
-[`workflows/dogfood-pause-gates.md`](workflows/dogfood-pause-gates.md). The next
-feature slice is the approved production packet, but it must not begin until the
-current phone/manual dogfood outcome is recorded.
+Implementation has advanced from Dogfood Pause 0 into the UI/UX release-candidate
+hardening pass. The approved pause criteria and ordered gates remain recorded in
+[`workflows/dogfood-pause-gates.md`](workflows/dogfood-pause-gates.md). The current
+release position is **RC0 verified Studio delivery complete; stable exit not yet
+reached**. Mobile/browser acceptance, accessibility, and production deployment
+evidence remain open gates.
+
+## Verified Studio delivery checkpoint
+
+- Studio now targets the sequence selected by the route across project refresh,
+  runtime events, spatial frames, managed media, screenshot review, render, and
+  delivery. It no longer silently falls back to the control project's first
+  engine project after initial page load.
+- Project and sequence names are editable in Studio. The engine project name is
+  changed through the declared, revision-checked `project.rename` command, then
+  the control-plane project and exact Studio sequence are synchronized in one
+  transaction.
+- The global runtime strip exposes connecting, connected, reconnecting, and
+  offline states plus the latest render receipt transition. Active renders poll
+  at two seconds while the normal connected reconciliation remains fifteen
+  seconds.
+- Verified video and JSON receipt downloads are available in both Deliver and
+  Governance. The same-origin download routes require an `observed_success`
+  `render.verified` receipt, matching artifact ID and SHA-256, passed QC, exact
+  sequence ownership, and authenticated workspace access. Failed-QC downloads
+  return HTTP 409.
+- The local dogfood Studio is named `SAG Repository Proof` with sequence
+  `SAG Repository Short 9x16`. It exposes the accepted 30-second 1080x1920
+  artifact and receipt. A download through the Studio route reproduced SHA-256
+  `ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77`.
+- Verification on July 27 passed the full SAG engine suite with one expected
+  skip, all workspace TypeScript checks, and the optimized Next.js production
+  build. The new Playwright cases are committed and typechecked, but browser
+  execution remains a Linux CI/staging gate because Playwright does not ship a
+  supported Android/Termux browser runtime.
 
 ## Unified Studio and SAG Spatial Runtime
 

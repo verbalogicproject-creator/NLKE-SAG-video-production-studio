@@ -21,7 +21,9 @@ class BrandContract(BaseModel):
     required_disclosures: dict[str, str] = Field(default_factory=dict)
     palette: list[str] = Field(default_factory=list)
     font_family: str = "Noto Sans"
-    caption_preset: Literal["bold_pop", "clean", "minimal"] = "bold_pop"
+    caption_preset: Literal[
+        "clean", "karaoke", "bold_pop", "glow_pulse", "typewriter_reveal", "minimal",
+    ] = "bold_pop"
     text_color: str = "#FFFFFF"
     highlight_color: str = "#F8E71C"
     background_color: str = "#000000B8"

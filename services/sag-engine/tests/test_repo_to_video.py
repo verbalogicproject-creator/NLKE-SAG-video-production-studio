@@ -54,6 +54,74 @@ def test_prompt_studio_contract_and_preview_are_read_only(client):
     assert after == before
 
 
+def test_production_session_is_engine_owned_revisioned_and_recoverable(client):
+    contract = client.get("/api/contract").json()
+    assert contract["production_session_schema_version"] == "sag-production-session/1.0"
+    assert set(contract["production_schemas"]) == {
+        "ProductionSession", "ProductionSessionUpdate", "RepoVideoDraft",
+    }
+
+    initial = client.get("/api/projects/demo/repo-to-video/production")
+    assert initial.status_code == 200
+    initial_production = initial.json()["production"]
+    assert initial_production["revision"] == 1
+    assert initial_production["current_stage"] == "director"
+    assert initial_production["director_input"] is None
+
+    draft = client.put("/api/projects/demo/repo-to-video/production", json={
+        "expected_revision": 1,
+        "director_tab": "prompts",
+        "director_input": {"repository_url": "https://github.com/"},
+    })
+    assert draft.status_code == 200, draft.text
+    assert draft.json()["production"]["director_input"]["repository_url"] == "https://github.com/"
+
+    restored = client.put("/api/projects/demo/repo-to-video/production", json={
+        "expected_revision": 2,
+        "director_tab": "direction",
+        "director_input": None,
+    })
+    assert restored.status_code == 200, restored.text
+
+    saved = client.put("/api/projects/demo/repo-to-video/production", json={
+        "expected_revision": 3,
+        "current_stage": "scenes",
+        "active_depth": "context",
+        "focused_entity_id": "scene_hook",
+        "director_input": {
+            "repository_url": "https://github.com/example/project",
+            "creative_instructions": "Show only verified repository behavior.",
+            "audience": "Developers",
+            "goal": "Explain the project",
+            "duration_seconds": 60,
+            "visual_style": "Technical documentary",
+            "target_platform": "youtube_shorts",
+            "brand_kit": "",
+            "reference_assets": [],
+        },
+        "evidence_revision": "evidence-verified",
+    })
+    assert saved.status_code == 200
+    production = saved.json()["production"]
+    assert production["revision"] == 4
+    assert production["current_stage"] == "scenes"
+    assert production["focused_entity_id"] == "scene_hook"
+    assert production["director_input"]["repository_url"] == "https://github.com/example/project"
+    assert client.get("/api/projects/demo/repo-to-video/production").json()["production"] == production
+
+    stale = client.put("/api/projects/demo/repo-to-video/production", json={
+        "expected_revision": 1, "current_stage": "edit",
+    })
+    assert stale.status_code == 409
+    assert "stale production session" in stale.json()["detail"]
+
+    cleared = client.put("/api/projects/demo/repo-to-video/production", json={
+        "expected_revision": 4, "focused_entity_id": None,
+    })
+    assert cleared.status_code == 200
+    assert cleared.json()["production"]["focused_entity_id"] is None
+
+
 def test_repository_evidence_redacts_secrets():
     assert "[REDACTED]" in redact("API_KEY=AIza123456789012345678901234")
     assert "AIza" not in redact("AIza123456789012345678901234")

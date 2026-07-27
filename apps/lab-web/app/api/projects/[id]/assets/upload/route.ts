@@ -4,15 +4,21 @@ import { db } from '@/lib/db';
 import { sagEngine } from '@/lib/engine';
 import { apiError, jsonSafe, prismaJson } from '@/lib/http';
 import { managedBlobUri } from '@/lib/storage';
+import { studioTarget } from '@/lib/studio-target';
 import { requireWorkspace } from '@/lib/workspace';
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { workspaceId } = await requireWorkspace();
     const { id } = await params;
-    const uploadAssetId = new URL(request.url).searchParams.get('uploadSessionId');
-    const project = await db.project.findFirst({ where: { id, workspaceId } });
-    if (!project?.engineProjectId) return NextResponse.json({ error: 'project_not_found' }, { status: 404 });
+    const query = new URL(request.url).searchParams;
+    const uploadAssetId = query.get('uploadSessionId');
+    const sequenceId = query.get('sequence_id');
+    const controlProject = await db.project.findFirst({ where: { id, workspaceId } });
+    if (!controlProject) return NextResponse.json({ error: 'project_not_found' }, { status: 404 });
+    const sequence = sequenceId ? (await studioTarget(id, workspaceId, sequenceId)).sequence : null;
+    const engineProjectId = sequence?.engineProjectId ?? controlProject.engineProjectId;
+    if (!engineProjectId) return NextResponse.json({ error: 'project_not_found' }, { status: 404 });
     const incoming = await request.formData();
     const file = incoming.get('file');
     if (!(file instanceof File)) return NextResponse.json({ error: 'file_required' }, { status: 422 });
@@ -20,7 +26,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     forwarded.set('file', file, file.name);
     forwarded.set('request_id', `lab-upload-${randomUUID()}`);
     forwarded.set('actor', 'verbalogix-web');
-    const result = await sagEngine.upload(workspaceId, project.engineProjectId, forwarded) as {
+    const result = await sagEngine.upload(workspaceId, engineProjectId, forwarded) as {
       asset?: Record<string, unknown>;
       receipt?: {
         project_revision?: number;
@@ -49,7 +55,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       } });
       const created = await tx.asset.create({ data: {
         id: upload?.assetId,
-        projectId: project.id,
+        projectId: controlProject.id,
         storageObjectId: object.id,
         kind: 'RAW',
         managedUri: managedBlobUri(upload?.assetId ?? String(engineAsset.id)),
@@ -73,8 +79,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       } });
       return created;
     });
-    const engineState = await sagEngine.project(workspaceId, project.engineProjectId);
-    await db.project.update({ where: { id: project.id }, data: { status: 'READY', engineRevision: engineState.project.revision } });
+    const engineState = await sagEngine.project(workspaceId, engineProjectId);
+    await db.$transaction([
+      db.project.update({ where: { id: controlProject.id }, data: { status: 'READY', engineRevision: engineState.project.revision } }),
+      ...(sequence ? [db.studioSequence.update({
+        where: { id: sequence.id }, data: { currentRevision: engineState.project.revision },
+      })] : []),
+    ]);
     return NextResponse.json(jsonSafe({ asset, engine: result }), { status: 201 });
   } catch (error) {
     return apiError(error);

@@ -7,7 +7,7 @@ from .migrations import NORMALIZED_SCHEMA
 from .models import utc_now
 
 
-POSTGRES_SCHEMA_VERSION = 8
+POSTGRES_SCHEMA_VERSION = 10
 
 
 def _postgres_schema() -> str:
@@ -24,6 +24,12 @@ def _postgres_schema() -> str:
     )
     start = schema.index("CREATE TABLE IF NOT EXISTS actor_focus (")
     end = schema.index("CREATE TABLE IF NOT EXISTS workspaces (", start)
+    schema = schema[:start] + schema[end:]
+    # Production sessions were added in append-only migration 9. Exclude them
+    # from the frozen migration-1 checksum even though SQLite's fresh schema
+    # includes the current table set.
+    start = schema.index("CREATE TABLE IF NOT EXISTS production_sessions (")
+    end = schema.index("CREATE TABLE IF NOT EXISTS project_revisions (", start)
     schema = schema[:start] + schema[end:]
     return schema.replace(
         "id INTEGER PRIMARY KEY AUTOINCREMENT,", "id BIGSERIAL PRIMARY KEY,"
@@ -173,6 +179,34 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
              ON sag_journal_entries(namespace,seq);
            CREATE INDEX IF NOT EXISTS idx_sag_journal_kind_created
              ON sag_journal_entries(kind,created_at);""",
+    ),
+    (
+        9,
+        "engine_owned_production_sessions",
+        """CREATE TABLE IF NOT EXISTS production_sessions(
+             project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+             revision INTEGER NOT NULL CHECK(revision >= 1),
+             body_json TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+           );""",
+    ),
+    (
+        10,
+        "canonical_editorial_records",
+        """CREATE TABLE IF NOT EXISTS editorial_records(
+             id TEXT PRIMARY KEY,
+             project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+             workspace_id TEXT,
+             kind TEXT NOT NULL,
+             revision INTEGER NOT NULL CHECK(revision >= 1),
+             body_json TEXT NOT NULL,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+           );
+           CREATE INDEX IF NOT EXISTS idx_editorial_records_project_kind
+             ON editorial_records(project_id,kind,updated_at DESC);
+           CREATE INDEX IF NOT EXISTS idx_editorial_records_workspace_kind
+             ON editorial_records(workspace_id,kind,updated_at DESC);""",
     ),
 )
 

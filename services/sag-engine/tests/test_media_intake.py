@@ -2,6 +2,7 @@ import hashlib
 from io import BytesIO
 
 from media_fixtures import browser_capture, tiny_audio, tiny_video
+from PIL import Image, ImageCms
 
 
 def _upload(client, path, request_id="upload-request-0001", name=None):
@@ -109,3 +110,24 @@ def test_mobile_stylesheet_is_loaded(client):
     assert ".workspace > .panel:not(.mobile-pane-active)" in stylesheet.text
     assert 'class="timeline-scroll"' in index.text
     assert 'role="tablist"' in index.text
+
+
+def test_image_canonicalization_strips_volatile_icc_metadata(client, tmp_path):
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    source = tmp_path / "profiled.jpg"
+    Image.new("RGB", (96, 160), "#224466").save(source, format="JPEG", icc_profile=profile)
+    first_source = tmp_path / "first.jpg"
+    second_source = tmp_path / "second.jpg"
+    first_source.write_bytes(source.read_bytes())
+    second_source.write_bytes(source.read_bytes())
+
+    first, _ = client.app.state.media._normalize_image(first_source, "image/jpeg")
+    second, _ = client.app.state.media._normalize_image(second_source, "image/jpeg")
+    try:
+        assert hashlib.sha256(first.read_bytes()).hexdigest() == hashlib.sha256(second.read_bytes()).hexdigest()
+        with Image.open(first) as normalized:
+            assert "icc_profile" not in normalized.info
+            assert "exif" not in normalized.info
+    finally:
+        first.unlink(missing_ok=True)
+        second.unlink(missing_ok=True)

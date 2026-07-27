@@ -8,6 +8,8 @@ def test_registry_has_omni_veo_audio_and_music() -> None:
     assert "veo-3.1-lite-generate-preview" in ids
     assert "lyria-3-clip-preview" in ids
     assert "gemini-3.1-flash-tts-preview" in ids
+    assert "Wan-AI/Wan2.2-TI2V-5B" in ids
+    assert get_model("Wan-AI/Wan2.2-TI2V-5B").provider == "hf_fal"
     assert MODEL_REGISTRY_VERSION.startswith("google-gemini-")
     assert len(model_registry_hash()) == 64
 

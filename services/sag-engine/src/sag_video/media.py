@@ -7,9 +7,12 @@ import os
 import re
 import shutil
 import subprocess
+from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO, Any
 from uuid import uuid4
+
+from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
 
 from .models import Asset, MediaImportResult, Project, Receipt, ReceiptStatus, TICKS_PER_SECOND, utc_now
 from .store import Store
@@ -20,7 +23,13 @@ from .blob_storage import BlobStorage, FilesystemBlobStorage, StorageLocator, St
 ALLOWED_SUFFIXES = {
     ".mp4", ".m4v", ".mov", ".webm", ".mkv",
     ".m4a", ".mp3", ".wav", ".ogg", ".opus", ".aac",
+    ".jpg", ".jpeg", ".png", ".webp",
 }
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_MIME_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
+MAX_IMAGE_SIDE = 8192
+MAX_IMAGE_PIXELS = 40_000_000
 DURATION_ERROR = "media duration is missing, zero, or exceeds the configured limit"
 
 
@@ -195,6 +204,91 @@ class MediaService:
                 raise MediaIntakeError("video dimensions are missing or exceed the configured pixel limit")
         return {"probe": probe, "videos": videos, "audios": audios, "duration": duration}
 
+    def _normalize_image(self, path: Path, claimed_mime: str | None) -> tuple[Path, dict[str, Any]]:
+        if path.stat().st_size > MAX_IMAGE_BYTES:
+            raise MediaIntakeError(f"image exceeds {MAX_IMAGE_BYTES} byte limit")
+        normalized = path.with_name(f"{path.stem}-canonical.png")
+        try:
+            with Image.open(path) as opened:
+                detected_format = str(opened.format or "").upper()
+                detected_mime = IMAGE_MIME_TYPES.get(detected_format)
+                if detected_mime is None:
+                    raise MediaIntakeError("image format must be JPEG, PNG, or static WebP")
+                expected_formats = {
+                    ".jpg": {"JPEG"}, ".jpeg": {"JPEG"}, ".png": {"PNG"}, ".webp": {"WEBP"},
+                }.get(path.suffix.lower(), set())
+                if detected_format not in expected_formats:
+                    raise MediaIntakeError("image bytes do not match the upload filename contract")
+                if claimed_mime and claimed_mime not in {"application/octet-stream", detected_mime}:
+                    raise MediaIntakeError("claimed MIME type does not match decoded image")
+                if bool(getattr(opened, "is_animated", False)) or int(getattr(opened, "n_frames", 1)) != 1:
+                    raise MediaIntakeError("animated images are not accepted")
+                width, height = opened.size
+                if (
+                    width <= 0 or height <= 0
+                    or width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE
+                    or width * height > MAX_IMAGE_PIXELS
+                ):
+                    raise MediaIntakeError("image dimensions exceed the managed intake contract")
+                opened.load()
+                image = ImageOps.exif_transpose(opened)
+                icc_profile = opened.info.get("icc_profile")
+                if icc_profile:
+                    try:
+                        image = ImageCms.profileToProfile(
+                            image, ImageCms.ImageCmsProfile(BytesIO(icc_profile)),
+                            ImageCms.createProfile("sRGB"), outputMode="RGBA" if "A" in image.getbands() else "RGB",
+                        )
+                    except Exception as error:
+                        raise MediaIntakeError("image contains a malformed or unsupported color profile") from error
+                else:
+                    image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+                # Rebuild from pixels so Pillow cannot implicitly carry EXIF,
+                # ICC creation timestamps, or other decoder metadata into the
+                # canonical PNG. Identical decoded pixels must hash identically
+                # across process restarts and machines.
+                image = Image.frombytes(image.mode, image.size, image.tobytes())
+                image.save(normalized, format="PNG", optimize=False, compress_level=9)
+                canonical_width, canonical_height = image.size
+        except MediaIntakeError:
+            raise
+        except (Image.DecompressionBombError, Image.DecompressionBombWarning, UnidentifiedImageError, OSError) as error:
+            raise MediaIntakeError("image could not be safely decoded") from error
+        finally:
+            path.unlink(missing_ok=True)
+        return normalized, {
+            "detected_format": detected_format,
+            "detected_mime_type": detected_mime,
+            "canonical_format": "PNG",
+            "canonical_mime_type": "image/png",
+            "width": canonical_width,
+            "height": canonical_height,
+            "orientation_normalized": True,
+            "color_space": "sRGB",
+            "metadata_stripped": True,
+        }
+
+    def _create_image_thumbnail(self, project_id: str, source: Path, source_asset: Asset) -> Asset:
+        thumb_id = f"asset_{uuid4().hex[:16]}"
+        thumb_dir = self._asset_dir(self.proxy_dir, project_id, thumb_id)
+        thumb_dir.mkdir(parents=True)
+        thumb_path = thumb_dir / "thumbnail.jpg"
+        try:
+            with Image.open(source) as opened:
+                image = opened.convert("RGB")
+                image.thumbnail((480, 480), Image.Resampling.LANCZOS)
+                image.save(thumb_path, format="JPEG", quality=86, optimize=True)
+        except Exception:
+            shutil.rmtree(thumb_dir, ignore_errors=True)
+            raise
+        return Asset(
+            id=thumb_id, kind="image", name=f"{source_asset.name} thumbnail",
+            source_kind="derived", managed_uri=f"sag-media://{thumb_id}",
+            sha256=_sha256(thumb_path), byte_size=thumb_path.stat().st_size,
+            mime_type="image/jpeg", width=image.width, height=image.height,
+            parent_asset_id=source_asset.id, intake_status="observed_valid",
+        )
+
     def _normalize_browser_webm(self, path: Path) -> None:
         """Finalize a bounded live WebM so ffprobe can observe its duration."""
         normalized = path.with_name(f"{path.stem}-normalized.webm")
@@ -351,16 +445,24 @@ class MediaService:
             staged, digest, byte_size = self._stage_stream(project_id, source, suffix)
             incoming_sha256 = digest
             container_normalized = False
-            try:
-                details = self._probe(staged)
-            except MediaIntakeError as error:
-                if suffix != ".webm" or str(error) != DURATION_ERROR:
-                    raise
-                self._normalize_browser_webm(staged)
+            image_details: dict[str, Any] | None = None
+            if suffix in IMAGE_SUFFIXES:
+                staged, image_details = self._normalize_image(staged, claimed_mime)
+                suffix = ".png"
                 digest = _sha256(staged)
                 byte_size = staged.stat().st_size
-                details = self._probe(staged)
-                container_normalized = True
+                details = {"probe": {"streams": [{"codec_type": "image"}]}, "videos": [], "audios": [], "duration": 0.0}
+            else:
+                try:
+                    details = self._probe(staged)
+                except MediaIntakeError as error:
+                    if suffix != ".webm" or str(error) != DURATION_ERROR:
+                        raise
+                    self._normalize_browser_webm(staged)
+                    digest = _sha256(staged)
+                    byte_size = staged.stat().st_size
+                    details = self._probe(staged)
+                    container_normalized = True
             video = details["videos"][0] if details["videos"] else None
             audio = details["audios"][0] if details["audios"] else None
             duplicate_asset = next(
@@ -404,7 +506,7 @@ class MediaService:
                 )
                 return MediaImportResult(receipt=receipt, asset=duplicate_asset)
             asset_id = self._validate_id(asset_id_override) if asset_id_override else f"asset_{uuid4().hex[:16]}"
-            kind = "video" if video else "audio"
+            kind = "image" if image_details else "video" if video else "audio"
             asset = Asset(
                 id=asset_id,
                 kind=kind,
@@ -414,10 +516,10 @@ class MediaService:
                 original_filename=safe_name,
                 sha256=digest,
                 byte_size=byte_size,
-                mime_type=mimetypes.guess_type(safe_name)[0] or ("video/mp4" if video else "audio/mp4"),
-                duration_ticks=round(details["duration"] * TICKS_PER_SECOND),
-                width=int(video.get("width")) if video else None,
-                height=int(video.get("height")) if video else None,
+                mime_type="image/png" if image_details else mimetypes.guess_type(safe_name)[0] or ("video/mp4" if video else "audio/mp4"),
+                duration_ticks=None if image_details else round(details["duration"] * TICKS_PER_SECOND),
+                width=image_details["width"] if image_details else int(video.get("width")) if video else None,
+                height=image_details["height"] if image_details else int(video.get("height")) if video else None,
                 frame_rate=(video.get("avg_frame_rate") or video.get("r_frame_rate")) if video else None,
                 video_codec=video.get("codec_name") if video else None,
                 rotation=int((video.get("tags") or {}).get("rotate", 0)) if video else None,
@@ -433,6 +535,8 @@ class MediaService:
                     "claimed_mime_type": claimed_mime,
                     "container_normalized": container_normalized,
                     "incoming_sha256": incoming_sha256,
+                    "canonical_sha256": digest,
+                    "image": image_details,
                 },
             )
             source_dir = self._asset_dir(self.media_dir, project_id, asset_id)
@@ -440,10 +544,16 @@ class MediaService:
             final_source = source_dir / f"source{suffix}"
             os.replace(staged, final_source)
             staged = None
-            proxy_asset, thumbnail_asset = self._create_derivatives(project_id, final_source, asset, bool(video))
-            for managed_asset in (asset, proxy_asset, thumbnail_asset):
+            if image_details:
+                proxy_asset = None
+                thumbnail_asset = self._create_image_thumbnail(project_id, final_source, asset)
+                managed_assets = (asset, thumbnail_asset)
+            else:
+                proxy_asset, thumbnail_asset = self._create_derivatives(project_id, final_source, asset, bool(video))
+                managed_assets = (asset, proxy_asset, thumbnail_asset)
+            for managed_asset in managed_assets:
                 managed_path = self._managed_path(project_id, managed_asset)
-                stored = source_storage_override if managed_asset is asset and source_storage_override else self.blob_storage.put_immutable(
+                stored = source_storage_override if managed_asset is asset and source_storage_override and not image_details else self.blob_storage.put_immutable(
                     managed_path, workspace_id=project.workspace_id or project_id,
                     project_id=project_id, identity=managed_asset.id,
                     category="derived" if managed_asset.source_kind == "derived" else "media",
@@ -467,10 +577,10 @@ class MediaService:
                     duplicate_path = self._managed_path(project_id,managed_asset)
                     duplicate_path.unlink(missing_ok=True)
                     duplicate_path.parent.rmdir()
-            asset.proxy_asset_id = proxy_asset.id
+            asset.proxy_asset_id = proxy_asset.id if proxy_asset else None
             asset.thumbnail_asset_id = thumbnail_asset.id
             before = project.model_copy(deep=True)
-            project.assets.extend([asset, proxy_asset, thumbnail_asset])
+            project.assets.extend(managed_assets)
             project.revision += 1
             project.updated_at = utc_now()
             receipt.project_revision = project.revision
@@ -496,7 +606,7 @@ class MediaService:
                         "before_revision": before.revision,
                         "after_revision": project.revision,
                         "asset_id": asset.id,
-                        "proxy_asset_id": proxy_asset.id,
+                        "proxy_asset_id": proxy_asset.id if proxy_asset else None,
                         "thumbnail_asset_id": thumbnail_asset.id,
                         "observation": {
                             "kind": "managed_media_intake",
@@ -504,8 +614,8 @@ class MediaService:
                             "passed": True,
                             "findings": [
                                 {"code": "artifact_hash", "passed": True, "summary": "Uploaded bytes were hashed while copying.", "evidence": {"sha256": asset.sha256, "byte_size": byte_size}},
-                                {"code": "media_readable", "passed": True, "summary": "ffprobe found supported readable streams.", "evidence": asset.observation_summary},
-                                {"code": "derivatives_created", "passed": True, "summary": "A proxy and thumbnail were generated and hashed."},
+                                {"code": "media_readable", "passed": True, "summary": "Managed intake safely decoded the uploaded media.", "evidence": asset.observation_summary},
+                                {"code": "derivatives_created", "passed": True, "summary": "Managed derivatives were generated and hashed."},
                             ],
                         },
                     },

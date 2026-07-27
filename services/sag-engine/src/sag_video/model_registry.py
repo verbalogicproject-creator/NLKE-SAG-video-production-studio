@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 
 
 class ModelDescriptor(BaseModel):
-    id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,127}$")
-    provider: Literal["google"]
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$")
+    provider: Literal["google", "hf_fal"]
     family: Literal["video", "audio", "music", "image", "reasoning"]
     lifecycle: Literal["preview", "ga", "deprecated"]
     capabilities: list[str] = Field(min_length=1, max_length=32)
@@ -26,7 +26,7 @@ class ModelDescriptor(BaseModel):
     notes: str = Field(default="", max_length=1000)
 
 
-MODEL_REGISTRY_VERSION = "google-gemini-2026-07-26.1"
+MODEL_REGISTRY_VERSION = "google-gemini-hf-fal-2026-07-27.1"
 
 GOOGLE_MODELS: tuple[ModelDescriptor, ...] = (
     ModelDescriptor(
@@ -76,9 +76,29 @@ GOOGLE_MODELS: tuple[ModelDescriptor, ...] = (
     ),
 )
 
+HF_FAL_MODELS: tuple[ModelDescriptor, ...] = (
+    ModelDescriptor(
+        id="Wan-AI/Wan2.2-TI2V-5B", provider="hf_fal", family="video", lifecycle="ga",
+        capabilities=["video_generation", "native_vertical", "text_to_video", "image_to_video"],
+        input_modalities=["text", "image"], output_modalities=["video"],
+        default_for=["cost_sensitive_vertical_video"],
+        documentation_url="https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B",
+        notes="Acceptance provider for bounded 9:16 connective clips through HF routed inference and fal.",
+    ),
+    ModelDescriptor(
+        id="genmo/mochi-1-preview", provider="hf_fal", family="video", lifecycle="preview",
+        capabilities=["video_generation", "text_to_video"],
+        input_modalities=["text"], output_modalities=["video"],
+        documentation_url="https://huggingface.co/genmo/mochi-1-preview",
+        notes="Experimental only; excluded from the acceptance render.",
+    ),
+)
+
+MODELS = GOOGLE_MODELS + HF_FAL_MODELS
+
 
 def model_registry() -> list[dict[str, Any]]:
-    return [entry.model_dump(mode="json") for entry in GOOGLE_MODELS]
+    return [entry.model_dump(mode="json") for entry in MODELS]
 
 
 def model_registry_hash() -> str:
@@ -87,7 +107,7 @@ def model_registry_hash() -> str:
 
 
 def get_model(model_id: str) -> ModelDescriptor:
-    for model in GOOGLE_MODELS:
+    for model in MODELS:
         if model.id == model_id:
             return model
     raise ValueError(f"unsupported generative model: {model_id}")

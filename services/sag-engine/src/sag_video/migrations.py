@@ -9,7 +9,7 @@ from uuid import uuid4
 from .models import Asset, Canvas, Project, Receipt, ReceiptStatus, TimelineItem, Track, utc_now
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 
 
 NORMALIZED_SCHEMA = """
@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS production_sessions (
+    project_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    body_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS project_revisions (
@@ -1477,6 +1485,56 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 ("provider_neutral_tamper_evident_journal", utc_now()),
             )
             connection.execute("PRAGMA user_version=12")
+        applied.add(12)
+    if 13 not in applied:
+        with connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS production_sessions (
+                    project_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL CHECK(revision >= 1),
+                    body_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (13,?,?)",
+                ("engine_owned_production_sessions", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=13")
+        applied.add(13)
+    if 14 not in applied:
+        with connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS editorial_records (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    workspace_id TEXT,
+                    kind TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision >= 1),
+                    body_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_editorial_records_project_kind
+                    ON editorial_records(project_id,kind,updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_editorial_records_workspace_kind
+                    ON editorial_records(workspace_id,kind,updated_at DESC);
+            """)
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (14,?,?)",
+                ("canonical_editorial_records", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=14")
     connection.execute("PRAGMA foreign_keys=ON")
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:

@@ -145,9 +145,10 @@ function collectBindings(
 }
 
 export function useSpatialAwareness({
-  projectId, revision, depth, triggerKey,
+  projectId, sequenceId, revision, depth, triggerKey,
 }: {
   projectId: string;
+  sequenceId: string;
   revision: number;
   depth: StudioDepth;
   triggerKey: string;
@@ -164,7 +165,7 @@ export function useSpatialAwareness({
     if (!root || document.visibilityState === 'hidden') return null;
     setStatus('declaring');
     const snapshotResponse = await fetch(
-      `/api/projects/${projectId}/studio/spatial?depth=system&hop_count=6`, { cache: 'no-store' },
+      `/api/projects/${projectId}/studio/spatial?depth=system&hop_count=6&sequence_id=${encodeURIComponent(sequenceId)}`, { cache: 'no-store' },
     );
     if (!snapshotResponse.ok) throw new Error('Spatial authority snapshot failed');
     const snapshot = await snapshotResponse.json() as AuthoritySnapshot;
@@ -186,7 +187,7 @@ export function useSpatialAwareness({
       grid, bindings: collected.bindings, truncated_bindings: collected.truncated,
       redaction_state: 'metadata_only',
     };
-    const response = await fetch(`/api/projects/${projectId}/studio/spatial/frames`, {
+    const response = await fetch(`/api/projects/${projectId}/studio/spatial/frames?sequence_id=${encodeURIComponent(sequenceId)}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request),
     });
     if (!response.ok) {
@@ -198,7 +199,7 @@ export function useSpatialAwareness({
     setFrame(next);
     setStatus('declared');
     return next;
-  }, [projectId]);
+  }, [projectId, sequenceId]);
 
   useEffect(() => {
     let cancelled = false;

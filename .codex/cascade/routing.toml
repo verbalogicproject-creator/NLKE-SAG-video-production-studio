@@ -1,0 +1,21 @@
+version = "sag-model-cascade/1.0"
+max_parallel_readers = 3
+max_parallel_writers = 1
+max_attempts_per_task = 2
+silent_model_fallback = false
+
+[roles.sol]
+model = "gpt-5.6-sol"
+owns = ["planning", "architecture", "security", "final_review"]
+
+[roles.terra]
+model = "gpt-5.6-terra"
+owns = ["implementation", "integration", "debugging", "tests"]
+
+[roles.luna]
+model = "gpt-5.6-luna"
+owns = ["discovery", "extraction", "classification", "log_triage"]
+
+[escalation]
+luna_to_terra = ["write_required", "ambiguous_requirement", "low_confidence"]
+terra_to_sol = ["architecture_change", "security_boundary", "migration", "two_failed_attempts"]
