@@ -165,3 +165,19 @@ def test_missing_artifact_never_becomes_success(tmp_path: Path):
     )
     assert result.passed is False
     assert result.findings[0].code == "artifact_exists"
+
+
+def test_narration_contract_rejects_tonal_audio(tmp_path: Path):
+    artifact = tiny_video(tmp_path / "tonal-audio.mp4", duration=.7)
+    result = observe_artifact(
+        ObservationContract(
+            project_id="demo", project_revision=1,
+            artifact_path=str(artifact), artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            width=320, height=180, duration_seconds=.7, fps=30,
+            safe_margin_x=16, safe_margin_y=9,
+            expect_audio=True, expect_narration=True,
+        )
+    )
+    narration = next(entry for entry in result.findings if entry.code == "narration_spectral_activity")
+    assert narration.passed is False
+    assert narration.evidence["average_spectral_entropy"] < narration.evidence["minimum_spectral_entropy"]

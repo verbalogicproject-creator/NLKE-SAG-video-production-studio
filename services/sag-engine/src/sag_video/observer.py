@@ -118,6 +118,36 @@ def observe_artifact(contract: ObservationContract) -> ObservationResult:
             summary="True peak is inside the delivery ceiling" if peak_passed else "True peak is missing or exceeds the delivery ceiling",
             evidence={"true_peak_dbfs": true_peak, "maximum_dbfs": -1.0},
         ))
+        if contract.expect_narration:
+            spectral = _run([
+                "ffmpeg", "-nostdin", "-hide_banner", "-v", "info", "-i", str(artifact),
+                "-map", "0:a:0", "-af", "aspectralstats=measure=entropy,ametadata=print",
+                "-f", "null", "-",
+            ], timeout=90)
+            entropy_matches = re.findall(
+                rb"lavfi\.aspectralstats\.\d+\.entropy=(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)",
+                spectral.stderr,
+                flags=re.IGNORECASE,
+            )
+            average_entropy = (
+                sum(float(value) for value in entropy_matches) / len(entropy_matches)
+                if entropy_matches else None
+            )
+            minimum_entropy = .10
+            narration_passed = average_entropy is not None and average_entropy >= minimum_entropy
+            findings.append(ObservationFinding(
+                code="narration_spectral_activity", passed=narration_passed,
+                summary=(
+                    "Narration track contains non-tonal program activity"
+                    if narration_passed else
+                    "Narration track is missing non-tonal program activity or is dominated by a tone"
+                ),
+                evidence={
+                    "average_spectral_entropy": average_entropy,
+                    "minimum_spectral_entropy": minimum_entropy,
+                    "sample_count": len(entropy_matches),
+                },
+            ))
 
     observed_duration = float(metadata.get("format", {}).get("duration", 0))
     duration_passed = abs(observed_duration - contract.duration_seconds) <= max(0.15, 2 / contract.fps)

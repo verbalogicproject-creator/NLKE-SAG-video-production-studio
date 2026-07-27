@@ -56,14 +56,20 @@ SAG is a technical video-production cockpit for a solo expert operator. Its esta
 - Added same-origin verified MP4 and JSON receipt downloads in Deliver and Governance
 - Bound all Studio data routes to the sequence selected in the page URL
 - Verified that the accepted Studio download reproduces the receipt SHA-256 and that failed-QC downloads return HTTP 409
+- Replaced the screenshot-only proof with a 30-second hybrid cut: source-aligned
+  cinematic motion, authentic SAG screen inserts, complete narration, and a
+  mixed music bed
+- Added a blocking narration spectral-activity check so normalized hum cannot
+  satisfy the production audio gate
 
 ### Current checkpoint
 
 RC0's implementation slice is complete and verified locally. The dogfood control
 project is `SAG Repository Proof`; its active sequence is `SAG Repository Short
-9x16`. The accepted output remains revision 13 while the descriptive rename is
-revision 14, so the UI correctly presents the historical verified revision
-without claiming that a newer render exists.
+9x16`. The corrected hybrid output is the current verified project revision 21.
+Its Studio-download artifact is `artifact_b674e91a7acf4d20`, receipt
+`receipt_0cd75e10205a41ad`, and SHA-256
+`3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141`.
 
 The RC0 exit gate remains open until the same naming-to-download path is repeated
 by hand in a clean browser session. RC1 through RC4 also remain open; in

@@ -30,8 +30,19 @@ evidence remain open gates.
   return HTTP 409.
 - The local dogfood Studio is named `SAG Repository Proof` with sequence
   `SAG Repository Short 9x16`. It exposes the accepted 30-second 1080x1920
-  artifact and receipt. A download through the Studio route reproduced SHA-256
-  `ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77`.
+  hybrid artifact and receipt at project revision 21. The cut retains the
+  cinematic motion language of the earlier concept while authentic SAG Studio
+  screenshots occupy the evidence-bearing UI regions. A download through the
+  Studio route reproduced SHA-256
+  `3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141`.
+- The accepted audio contains a 29.9-second narration edit plus the original
+  music bed. Observer v0.2 now blocks a designated Narration track when decoded
+  spectral entropy is below the non-tonal activity threshold, preventing an
+  amplified low-level tone from passing merely because its stream and LUFS are
+  valid. The accepted artifact measured 0.15239 against the 0.10 minimum,
+  -14.9 LUFS integrated loudness, and -1.4 dBFS true peak. Re-observing the
+  rejected hum artifact through the same contract produced 0.06080 and failed
+  the new blocking check.
 - Verification on July 27 passed the full SAG engine suite with one expected
   skip, all workspace TypeScript checks, and the optimized Next.js production
   build. The new Playwright cases are committed and typechecked, but browser

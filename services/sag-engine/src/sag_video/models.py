@@ -336,6 +336,7 @@ class ObservationContract(BaseModel):
     safe_margin_y: int
     marker_rgb: tuple[int, int, int] | None = None
     expect_audio: bool = False
+    expect_narration: bool = False
     expect_captions: bool = False
 
 
@@ -347,7 +348,7 @@ class ObservationFinding(BaseModel):
 
 
 class ObservationResult(BaseModel):
-    observer: str = "artifact-frame-observer-v0.1"
+    observer: str = "artifact-frame-observer-v0.2"
     observer_failure_domain: str = "separate-process-compatible"
     passed: bool
     findings: list[ObservationFinding]

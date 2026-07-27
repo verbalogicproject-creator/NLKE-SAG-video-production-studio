@@ -1,1 +1,377 @@
-{"id":"receipt_4dc1508210224334","project_id":"project_2d9691d35e01","command":"render.verified","status":"observed_success","request_id":"acceptance-render-0004","actor":"release-candidate","project_revision":13,"payload":{"artifact_id":"artifact_705da3f0197348b8","artifact_sha256":"ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77","artifact_url":"/api/artifacts/artifact_705da3f0197348b8/content","controller":"allowlisted-ffmpeg-controller-v0.2","ffmpeg_arguments_hash":"8cb55f6a339718f47bd59cc7251c5cae3d6c37cb1ce518dc5b12b6ef53b4333d","job_id":"job_cc3897ba9b3043cf","project_revision":13,"qc_report":{"artifact_id":"artifact_705da3f0197348b8","artifact_sha256":"ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77","checks":[{"code":"dimensions","detail":"Video stream matches the requested canvas","expected":null,"observed":{"expected_height":1920,"expected_width":1080,"observed":{"codec_name":"h264","codec_type":"video","height":1920,"r_frame_rate":"30/1","width":1080}},"passed":true},{"code":"duration","detail":"Artifact duration is within tolerance","expected":null,"observed":{"expected_seconds":30.0,"observed_seconds":30.0},"passed":true},{"code":"frame_rate","detail":"Frame rate matches the render specification","expected":null,"observed":{"expected_fps":30.0,"observed_fps":30.0},"passed":true},{"code":"representative_decode","detail":"Observer decoded a representative output frame","expected":null,"observed":{"height":1920,"width":1080},"passed":true},{"code":"scene_coverage","detail":"Every frozen media item passed source validation before encoding","expected":{"minimum":1},"observed":{"rendered_media_items":6},"passed":true},{"code":"caption_readability","detail":"Captions were not required","expected":null,"observed":null,"passed":true},{"code":"caption_timing","detail":"Word timing is ordered and positive in the frozen render specification","expected":null,"observed":{"caption_tracks":0},"passed":true},{"code":"safe_areas","detail":"Observed title is inside the safe area","expected":null,"observed":{"declared_bounds":{"bottom":1719,"left":64,"right":1015,"top":1540},"observed_bounds":{"bottom":1719,"left":64,"right":1015,"top":1540},"safe_bounds":{"bottom":1823,"left":54,"right":1025,"top":96},"sample_bounds":[64,1540,1016,1720],"source":"decoded_output_frame"},"passed":true},{"code":"audio_presence","detail":"Audio stream presence matches the render specification","expected":null,"observed":{"expected_audio":true,"observed":{"channels":2,"codec_name":"aac","codec_type":"audio","r_frame_rate":"0/0","sample_rate":"96000"}},"passed":true},{"code":"integrated_loudness","detail":"Integrated loudness is inside the delivery range","expected":null,"observed":{"integrated_lufs":-15.9,"maximum_lufs":-13.0,"minimum_lufs":-19.0},"passed":true},{"code":"true_peak","detail":"True peak is inside the delivery ceiling","expected":null,"observed":{"maximum_dbfs":-1.0,"true_peak_dbfs":-9.6},"passed":true},{"code":"sha256","detail":"Artifact hash matches the controller handoff","expected":null,"observed":{"expected_sha256":"ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77","observed_sha256":"ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77"},"passed":true}],"created_at":"2026-07-27T07:01:34.130930+00:00","id":"qc_artifact_705da3f0197348b8","passed":true,"project_id":"project_2d9691d35e01","project_revision":13,"schema_version":"sag-qc-report/1.0"},"qc_report_id":"qc_artifact_705da3f0197348b8","transitions":[{"status":"accepted","at":"2026-07-27T07:00:59.440644+00:00"},{"status":"dispatched","at":"2026-07-27T07:00:59.513750+00:00"},{"status":"rendering","at":"2026-07-27T07:00:59.514643+00:00"},{"status":"artifact_written","at":"2026-07-27T07:01:32.323541+00:00"},{"status":"awaiting_observation","at":"2026-07-27T07:01:32.324246+00:00"},{"status":"observed_success","at":"2026-07-27T07:01:34.133727+00:00"}],"observation":{"observed_at":"2026-07-27T07:01:34.102429+00:00","observer":"artifact-frame-observer-v0.1","observer_deployment":"separate_service","observer_failure_domain":"separate-process-compatible","passed":true,"findings":[{"code":"artifact_hash_contract","evidence":{"expected_sha256":"ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77","observed_sha256":"ddec96cb40ffebaede3eadd4eb97f351834564c856457f0c5bd52ee72a670a77"},"passed":true,"summary":"Artifact hash matches the controller handoff"},{"code":"video_stream_contract","evidence":{"expected_height":1920,"expected_width":1080,"observed":{"codec_name":"h264","codec_type":"video","height":1920,"r_frame_rate":"30/1","width":1080}},"passed":true,"summary":"Video stream matches the requested canvas"},{"code":"frame_rate_contract","evidence":{"expected_fps":30.0,"observed_fps":30.0},"passed":true,"summary":"Frame rate matches the render specification"},{"code":"audio_stream_contract","evidence":{"expected_audio":true,"observed":{"channels":2,"codec_name":"aac","codec_type":"audio","r_frame_rate":"0/0","sample_rate":"96000"}},"passed":true,"summary":"Audio stream presence matches the render specification"},{"code":"integrated_loudness","evidence":{"integrated_lufs":-15.9,"maximum_lufs":-13.0,"minimum_lufs":-19.0},"passed":true,"summary":"Integrated loudness is inside the delivery range"},{"code":"true_peak","evidence":{"maximum_dbfs":-1.0,"true_peak_dbfs":-9.6},"passed":true,"summary":"True peak is inside the delivery ceiling"},{"code":"duration_contract","evidence":{"expected_seconds":30.0,"observed_seconds":30.0},"passed":true,"summary":"Artifact duration is within tolerance"},{"code":"representative_frame_readable","evidence":{"height":1920,"width":1080},"passed":true,"summary":"Observer decoded a representative output frame"},{"code":"title_marker_visible","evidence":{"matching_pixels":161292,"minimum_marker_pixels":42840,"sample_bounds":[64,1540,1016,1720],"title_id":"item_b60a0b7cb86a40f9"},"passed":true,"summary":"Expected title plate is visible in the encoded frame"},{"code":"title_safe_area","evidence":{"declared_bounds":{"bottom":1719,"left":64,"right":1015,"top":1540},"observed_bounds":{"bottom":1719,"left":64,"right":1015,"top":1540},"safe_bounds":{"bottom":1823,"left":54,"right":1025,"top":96},"sample_bounds":[64,1540,1016,1720],"source":"decoded_output_frame"},"passed":true,"summary":"Observed title is inside the safe area"}]}},"created_at":"2026-07-27T07:00:59.440644+00:00","updated_at":"2026-07-27T07:01:34.133727+00:00"}
+{
+  "id": "receipt_0cd75e10205a41ad",
+  "project_id": "project_2d9691d35e01",
+  "command": "render.verified",
+  "status": "observed_success",
+  "request_id": "studio-render-project_2d9691d35e01-r21",
+  "actor": "verbalogix-orchestrator",
+  "project_revision": 21,
+  "payload": {
+    "artifact_id": "artifact_b674e91a7acf4d20",
+    "artifact_sha256": "3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141",
+    "artifact_url": "/api/artifacts/artifact_b674e91a7acf4d20/content",
+    "controller": "allowlisted-ffmpeg-controller-v0.2",
+    "ffmpeg_arguments_hash": "ff6a35a46c41f5e6488a8e26c191970fbfa323276737c2d0c5af03acd7fb1301",
+    "job_id": "job_ae1d25bf198f46f8",
+    "project_revision": 21,
+    "qc_report": {
+      "artifact_id": "artifact_b674e91a7acf4d20",
+      "artifact_sha256": "3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141",
+      "checks": [
+        {
+          "code": "dimensions",
+          "detail": "Video stream matches the requested canvas",
+          "expected": null,
+          "observed": {
+            "expected_height": 1920,
+            "expected_width": 1080,
+            "observed": {
+              "codec_name": "h264",
+              "codec_type": "video",
+              "height": 1920,
+              "r_frame_rate": "30/1",
+              "width": 1080
+            }
+          },
+          "passed": true
+        },
+        {
+          "code": "duration",
+          "detail": "Artifact duration is within tolerance",
+          "expected": null,
+          "observed": {
+            "expected_seconds": 30,
+            "observed_seconds": 30
+          },
+          "passed": true
+        },
+        {
+          "code": "frame_rate",
+          "detail": "Frame rate matches the render specification",
+          "expected": null,
+          "observed": {
+            "expected_fps": 30,
+            "observed_fps": 30
+          },
+          "passed": true
+        },
+        {
+          "code": "representative_decode",
+          "detail": "Observer decoded a representative output frame",
+          "expected": null,
+          "observed": {
+            "height": 1920,
+            "width": 1080
+          },
+          "passed": true
+        },
+        {
+          "code": "scene_coverage",
+          "detail": "Every frozen media item passed source validation before encoding",
+          "expected": {
+            "minimum": 1
+          },
+          "observed": {
+            "rendered_media_items": 14
+          },
+          "passed": true
+        },
+        {
+          "code": "caption_readability",
+          "detail": "Captions were not required",
+          "expected": null,
+          "observed": null,
+          "passed": true
+        },
+        {
+          "code": "caption_timing",
+          "detail": "Word timing is ordered and positive in the frozen render specification",
+          "expected": null,
+          "observed": {
+            "caption_tracks": 0
+          },
+          "passed": true
+        },
+        {
+          "code": "safe_areas",
+          "detail": "Observed title is inside the safe area",
+          "expected": null,
+          "observed": {
+            "declared_bounds": {
+              "bottom": 1719,
+              "left": 64,
+              "right": 1015,
+              "top": 1540
+            },
+            "observed_bounds": {
+              "bottom": 1719,
+              "left": 64,
+              "right": 1015,
+              "top": 1540
+            },
+            "safe_bounds": {
+              "bottom": 1823,
+              "left": 54,
+              "right": 1025,
+              "top": 96
+            },
+            "sample_bounds": [
+              64,
+              1540,
+              1016,
+              1720
+            ],
+            "source": "decoded_output_frame"
+          },
+          "passed": true
+        },
+        {
+          "code": "audio_presence",
+          "detail": "Audio stream presence matches the render specification",
+          "expected": null,
+          "observed": {
+            "expected_audio": true,
+            "observed": {
+              "channels": 2,
+              "codec_name": "aac",
+              "codec_type": "audio",
+              "r_frame_rate": "0/0",
+              "sample_rate": "96000"
+            }
+          },
+          "passed": true
+        },
+        {
+          "code": "integrated_loudness",
+          "detail": "Integrated loudness is inside the delivery range",
+          "expected": null,
+          "observed": {
+            "integrated_lufs": -14.9,
+            "maximum_lufs": -13,
+            "minimum_lufs": -19
+          },
+          "passed": true
+        },
+        {
+          "code": "true_peak",
+          "detail": "True peak is inside the delivery ceiling",
+          "expected": null,
+          "observed": {
+            "maximum_dbfs": -1,
+            "true_peak_dbfs": -1.5
+          },
+          "passed": true
+        },
+        {
+          "code": "narration_spectral_activity",
+          "detail": "Narration track contains non-tonal program activity",
+          "expected": null,
+          "observed": {
+            "average_spectral_entropy": 0.15239076074297903,
+            "minimum_spectral_entropy": 0.1,
+            "sample_count": 5626
+          },
+          "passed": true
+        },
+        {
+          "code": "sha256",
+          "detail": "Artifact hash matches the controller handoff",
+          "expected": null,
+          "observed": {
+            "expected_sha256": "3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141",
+            "observed_sha256": "3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141"
+          },
+          "passed": true
+        }
+      ],
+      "created_at": "2026-07-27T09:48:29.647941+00:00",
+      "id": "qc_artifact_b674e91a7acf4d20",
+      "passed": true,
+      "project_id": "project_2d9691d35e01",
+      "project_revision": 21,
+      "schema_version": "sag-qc-report/1.0"
+    },
+    "qc_report_id": "qc_artifact_b674e91a7acf4d20",
+    "transitions": [
+      {
+        "status": "accepted",
+        "at": "2026-07-27T09:46:28.546876+00:00"
+      },
+      {
+        "status": "dispatched",
+        "at": "2026-07-27T09:46:29.350585+00:00"
+      },
+      {
+        "status": "rendering",
+        "at": "2026-07-27T09:46:29.352403+00:00"
+      },
+      {
+        "status": "artifact_written",
+        "at": "2026-07-27T09:48:24.025901+00:00"
+      },
+      {
+        "status": "awaiting_observation",
+        "at": "2026-07-27T09:48:24.027664+00:00"
+      },
+      {
+        "status": "observed_success",
+        "at": "2026-07-27T09:48:29.656055+00:00"
+      }
+    ],
+    "observation": {
+      "observed_at": "2026-07-27T09:48:29.601725+00:00",
+      "observer": "artifact-frame-observer-v0.2",
+      "observer_deployment": "in_process_development",
+      "observer_failure_domain": "separate-process-compatible",
+      "passed": true,
+      "findings": [
+        {
+          "code": "artifact_hash_contract",
+          "evidence": {
+            "expected_sha256": "3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141",
+            "observed_sha256": "3d3cffbd88242aa779b06de6296672e50a4f6cbd0fbb80fd33277c702be30141"
+          },
+          "passed": true,
+          "summary": "Artifact hash matches the controller handoff"
+        },
+        {
+          "code": "video_stream_contract",
+          "evidence": {
+            "expected_height": 1920,
+            "expected_width": 1080,
+            "observed": {
+              "codec_name": "h264",
+              "codec_type": "video",
+              "height": 1920,
+              "r_frame_rate": "30/1",
+              "width": 1080
+            }
+          },
+          "passed": true,
+          "summary": "Video stream matches the requested canvas"
+        },
+        {
+          "code": "frame_rate_contract",
+          "evidence": {
+            "expected_fps": 30,
+            "observed_fps": 30
+          },
+          "passed": true,
+          "summary": "Frame rate matches the render specification"
+        },
+        {
+          "code": "audio_stream_contract",
+          "evidence": {
+            "expected_audio": true,
+            "observed": {
+              "channels": 2,
+              "codec_name": "aac",
+              "codec_type": "audio",
+              "r_frame_rate": "0/0",
+              "sample_rate": "96000"
+            }
+          },
+          "passed": true,
+          "summary": "Audio stream presence matches the render specification"
+        },
+        {
+          "code": "integrated_loudness",
+          "evidence": {
+            "integrated_lufs": -14.9,
+            "maximum_lufs": -13,
+            "minimum_lufs": -19
+          },
+          "passed": true,
+          "summary": "Integrated loudness is inside the delivery range"
+        },
+        {
+          "code": "true_peak",
+          "evidence": {
+            "maximum_dbfs": -1,
+            "true_peak_dbfs": -1.5
+          },
+          "passed": true,
+          "summary": "True peak is inside the delivery ceiling"
+        },
+        {
+          "code": "narration_spectral_activity",
+          "evidence": {
+            "average_spectral_entropy": 0.15239076074297903,
+            "minimum_spectral_entropy": 0.1,
+            "sample_count": 5626
+          },
+          "passed": true,
+          "summary": "Narration track contains non-tonal program activity"
+        },
+        {
+          "code": "duration_contract",
+          "evidence": {
+            "expected_seconds": 30,
+            "observed_seconds": 30
+          },
+          "passed": true,
+          "summary": "Artifact duration is within tolerance"
+        },
+        {
+          "code": "representative_frame_readable",
+          "evidence": {
+            "height": 1920,
+            "width": 1080
+          },
+          "passed": true,
+          "summary": "Observer decoded a representative output frame"
+        },
+        {
+          "code": "title_marker_visible",
+          "evidence": {
+            "matching_pixels": 161286,
+            "minimum_marker_pixels": 42840,
+            "sample_bounds": [
+              64,
+              1540,
+              1016,
+              1720
+            ],
+            "title_id": "item_b60a0b7cb86a40f9"
+          },
+          "passed": true,
+          "summary": "Expected title plate is visible in the encoded frame"
+        },
+        {
+          "code": "title_safe_area",
+          "evidence": {
+            "declared_bounds": {
+              "bottom": 1719,
+              "left": 64,
+              "right": 1015,
+              "top": 1540
+            },
+            "observed_bounds": {
+              "bottom": 1719,
+              "left": 64,
+              "right": 1015,
+              "top": 1540
+            },
+            "safe_bounds": {
+              "bottom": 1823,
+              "left": 54,
+              "right": 1025,
+              "top": 96
+            },
+            "sample_bounds": [
+              64,
+              1540,
+              1016,
+              1720
+            ],
+            "source": "decoded_output_frame"
+          },
+          "passed": true,
+          "summary": "Observed title is inside the safe area"
+        }
+      ]
+    }
+  },
+  "created_at": "2026-07-27T09:46:28.546876+00:00",
+  "updated_at": "2026-07-27T09:48:29.656055+00:00"
+}

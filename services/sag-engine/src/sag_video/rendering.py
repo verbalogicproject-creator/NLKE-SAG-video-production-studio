@@ -30,6 +30,7 @@ class RenderMediaSpec(BaseModel):
     kind: Literal["video", "audio", "image"]
     asset_sha256: str
     has_audio: bool
+    track_name: str
     start_seconds: float
     duration_seconds: float
     source_in_seconds: float
@@ -260,6 +261,7 @@ class RenderService:
                     media.append(RenderMediaSpec(
                         item_id=item.id, asset_id=asset.id, kind=item.kind,
                         asset_sha256=asset.sha256, has_audio=bool(asset.audio_codec) or item.kind == "audio",
+                        track_name=track.name,
                         start_seconds=item.start_ticks / TICKS_PER_SECOND,
                         duration_seconds=item.duration_ticks / TICKS_PER_SECOND,
                         source_in_seconds=item.source_in_ticks / TICKS_PER_SECOND,
@@ -310,6 +312,10 @@ class RenderService:
             )
 
         has_audio = any(item.has_audio for item in spec.media)
+        expects_narration = any(
+            item.has_audio and not item.muted and "narrat" in item.track_name.lower()
+            for item in spec.media
+        )
         checks = [
             check("dimensions", "video_stream_contract", "Canvas dimensions were not observed"),
             check("duration", "duration_contract", "Duration was not observed"),
@@ -333,6 +339,10 @@ class RenderService:
             check("audio_presence", "audio_stream_contract", "Audio stream presence was not observed"),
             check("integrated_loudness", "integrated_loudness", "Integrated loudness was not required", default=not has_audio),
             check("true_peak", "true_peak", "True peak was not required", default=not has_audio),
+            check(
+                "narration_spectral_activity", "narration_spectral_activity",
+                "Narration spectral activity was not required", default=not expects_narration,
+            ),
             check("sha256", "artifact_hash_contract", "Artifact hash was not observed"),
         ]
         report = QCReport(
@@ -518,6 +528,10 @@ class RenderService:
             safe_margin_x=round(spec.width * .05), safe_margin_y=round(spec.height * .05),
             marker_rgb=_rgb(title.color) if title else None,
             expect_audio=any(item.has_audio for item in spec.media),
+            expect_narration=any(
+                item.has_audio and not item.muted and "narrat" in item.track_name.lower()
+                for item in spec.media
+            ),
             expect_captions=bool(spec.captions),
         )
         artifact = self.store.create_artifact(ArtifactRecord(
