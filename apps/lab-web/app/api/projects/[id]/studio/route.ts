@@ -99,6 +99,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       );
     } else if (operation === 'pair') {
       result = await sagEngine.pair(workspaceId, sequence.engineProjectId);
+    } else if (operation === 'pair_computer_use') {
+      result = await sagEngine.pairComputerUse(workspaceId);
     } else if (operation === 'render') {
       result = await sagEngine.render(
         workspaceId,

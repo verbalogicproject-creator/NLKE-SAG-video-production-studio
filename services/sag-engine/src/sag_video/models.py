@@ -305,6 +305,9 @@ class PairStartRequest(BaseModel):
     workspace_id: str = "demo"
     project_id: str | None = None
     sequence_id: str | None = None
+    principal_kind: Literal["terminal", "browser_extension"] = "terminal"
+    audience: Literal["sag_api", "computer_use"] = "sag_api"
+    allowed_origins: list[str] = Field(default_factory=list, max_length=32)
     scopes: list[str] = Field(
         default_factory=lambda: [
             "context:read", "project:read", "project:write", "analysis:run",

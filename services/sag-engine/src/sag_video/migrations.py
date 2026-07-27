@@ -9,7 +9,7 @@ from uuid import uuid4
 from .models import Asset, Canvas, Project, Receipt, ReceiptStatus, TimelineItem, Track, utc_now
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 NORMALIZED_SCHEMA = """
@@ -1535,6 +1535,27 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 ("canonical_editorial_records", utc_now()),
             )
             connection.execute("PRAGMA user_version=14")
+        applied.add(14)
+    if 15 not in applied:
+        with connection:
+            for table in ("pairings", "tokens"):
+                columns = _table_columns(connection, table)
+                for name, declaration in (
+                    ("principal_kind", "TEXT NOT NULL DEFAULT 'terminal'"),
+                    ("audience", "TEXT NOT NULL DEFAULT 'sag_api'"),
+                    ("allowed_origins_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ):
+                    if name not in columns:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (15,?,?)",
+                ("browser_extension_pairing_audience", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=15")
     connection.execute("PRAGMA foreign_keys=ON")
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:

@@ -470,15 +470,20 @@ class Store:
         project_id: str | None = None,
         sequence_id: str | None = None,
         scopes: list[str] | None = None,
+        principal_kind: str = "terminal",
+        audience: str = "sag_api",
+        allowed_origins: list[str] | None = None,
     ) -> tuple[str, str]:
         code = f"{secrets.randbelow(1_000_000):06d}"
         expires = datetime.now(timezone.utc) + timedelta(minutes=10)
         with self._write():
             self._connection.execute(
                 """INSERT INTO pairings(
-                     code,workspace_id,project_id,sequence_id,scopes_json,expires_at,consumed
-                   ) VALUES (?,?,?,?,?,?,0)""",
-                (code, workspace_id, project_id, sequence_id, json.dumps(scopes or []), expires.isoformat()),
+                     code,workspace_id,project_id,sequence_id,scopes_json,principal_kind,audience,
+                     allowed_origins_json,expires_at,consumed
+                   ) VALUES (?,?,?,?,?,?,?,?,?,0)""",
+                (code, workspace_id, project_id, sequence_id, json.dumps(scopes or []),
+                 principal_kind, audience, json.dumps(allowed_origins or []), expires.isoformat()),
             )
         return code, expires.isoformat()
 
@@ -494,6 +499,9 @@ class Store:
                 str(row["workspace_id"]), actor_name,
                 project_id=row["project_id"], sequence_id=row["sequence_id"],
                 scopes=json.loads(row["scopes_json"] or "[]"),
+                principal_kind=str(row["principal_kind"] or "terminal"),
+                audience=str(row["audience"] or "sag_api"),
+                allowed_origins=json.loads(row["allowed_origins_json"] or "[]"),
             )
         return token, expires_at, self.principal_for_token(token) or {}
 
@@ -509,6 +517,9 @@ class Store:
             "project_id": str(row["project_id"]) if row["project_id"] else None,
             "sequence_id": str(row["sequence_id"]) if row["sequence_id"] else None,
             "scopes": json.loads(row["scopes_json"] or "[]"),
+            "principal_kind": str(row["principal_kind"] or "terminal"),
+            "audience": str(row["audience"] or "sag_api"),
+            "allowed_origins": json.loads(row["allowed_origins_json"] or "[]"),
             "token": token,
             "expires_at": str(row["expires_at"]),
         }
@@ -526,15 +537,20 @@ class Store:
         project_id: str | None = None,
         sequence_id: str | None = None,
         scopes: list[str] | None = None,
+        principal_kind: str = "terminal",
+        audience: str = "sag_api",
+        allowed_origins: list[str] | None = None,
     ) -> tuple[str, str]:
         token = secrets.token_urlsafe(32)
         expires = datetime.now(timezone.utc) + timedelta(hours=hours)
         with self._write():
             self._connection.execute(
                 """INSERT INTO tokens(
-                     token,workspace_id,project_id,sequence_id,scopes_json,actor_name,expires_at,revoked
-                   ) VALUES (?,?,?,?,?,?,?,0)""",
-                (token, workspace_id, project_id, sequence_id, json.dumps(scopes or ["*"]), actor_name, expires.isoformat()),
+                     token,workspace_id,project_id,sequence_id,scopes_json,principal_kind,audience,
+                     allowed_origins_json,actor_name,expires_at,revoked
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,0)""",
+                (token, workspace_id, project_id, sequence_id, json.dumps(scopes or ["*"]),
+                 principal_kind, audience, json.dumps(allowed_origins or []), actor_name, expires.isoformat()),
             )
         return token, expires.isoformat()
 

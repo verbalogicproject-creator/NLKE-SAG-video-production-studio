@@ -1,0 +1,41 @@
+{
+  "schema_version": "sag-computer-use-profile/1.0",
+  "profile_id": "sag.fixture.local",
+  "version": 1,
+  "issuer": "SAG Video",
+  "key_id": "sag-v1-2026-07",
+  "allowed_origins": ["http://127.0.0.1:4173", "http://localhost:4173"],
+  "adapter_id": "sag-fixture-dom-v1",
+  "entities": [
+    {
+      "entity_id": "fixture.value",
+      "role": "textbox",
+      "locator": {"kind": "test_id", "value": "computer-use-value"}
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "fixture.set_value",
+      "entity_ids": ["fixture.value"],
+      "route": "extension_handler",
+      "safety_class": "safe_reversible",
+      "required_scope": "computer_use:act",
+      "arguments_schema": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": false},
+      "effect_predicates": ["state_hash_changed", "target_visible"],
+      "compensation_action_id": "fixture.restore_value",
+      "checkpoint_policy": "before_after_required"
+    },
+    {
+      "action_id": "fixture.restore_value",
+      "entity_ids": ["fixture.value"],
+      "route": "extension_handler",
+      "safety_class": "safe_reversible",
+      "required_scope": "computer_use:act",
+      "arguments_schema": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"], "additionalProperties": false},
+      "effect_predicates": ["state_hash_changed", "target_visible"],
+      "compensation_action_id": "fixture.set_value",
+      "checkpoint_policy": "before_after_required"
+    }
+  ],
+  "signature": "FkIYTto-qmpAPxPHw785KVlyNhzd5BVCpSF1AYnDBSuzFdgJ8VkBPVsrDJPsFj_ahS5pikOgPnY8Fkl76Kw1CQ"
+}

@@ -24,6 +24,21 @@ async function callTool(request: Request, name: string, input: Record<string, un
   if (name === 'projects.list') {
     return db.project.findMany({ where: { workspaceId }, include: { assets: true }, orderBy: { updatedAt: 'desc' } });
   }
+  if (name === 'computer.activities.list') return sagEngine.computerUseActivities(workspaceId);
+  if (name === 'computer.activity.get') return sagEngine.computerUseActivity(workspaceId, String(input.activityId));
+  if (name === 'computer.actions.list') return sagEngine.computerUseActions(workspaceId, String(input.activityId));
+  if (name === 'computer.intent.create') return sagEngine.createComputerUseIntent(
+    workspaceId, String(input.activityId), {
+      request_id: input.requestId, before_observation_id: input.beforeObservationId,
+      action_id: input.actionId, target_binding_id: input.targetBindingId,
+      arguments: input.arguments, context_ref: input.contextRef ?? null,
+      expected_project_revision: input.expectedProjectRevision ?? null,
+    },
+  );
+  if (name === 'computer.intent.execute') return sagEngine.executeComputerUseIntent(
+    workspaceId, String(input.intentId), String(input.ticket),
+  );
+  if (name === 'computer.receipt.get') return sagEngine.computerUseReceipt(workspaceId, String(input.receiptId));
   if (name.startsWith('sequence.') || name.startsWith('action.') || name.startsWith('spatial.') || name.startsWith('semantic.') || name.startsWith('journal.')) {
     const sequence = await db.studioSequence.findFirst({
       where: { id: String(input.sequenceId), project: { workspaceId }, archivedAt: null },

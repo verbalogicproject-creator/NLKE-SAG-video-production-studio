@@ -1,0 +1,10 @@
+{
+  "name": "@verbalogix/nlke-sag-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "node --check src/background.js && node --check src/observer.js && node --check src/overlay.js"
+  }
+}

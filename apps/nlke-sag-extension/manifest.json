@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "NLKE–SAG Computer Use",
+  "version": "0.1.0",
+  "description": "User-activated, profile-governed observation and safe reversible actions with SAG receipts.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_title": "Open SAG Computer Use"},
+  "web_accessible_resources": [{"resources": ["overlay.css"], "matches": ["http://*/*", "https://*/*"]}]
+}

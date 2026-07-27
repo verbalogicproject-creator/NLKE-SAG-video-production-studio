@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+  "cryptography>=44",
   "fastapi>=0.115",
   "google-cloud-storage>=2.19",
   "google-genai>=1.30",

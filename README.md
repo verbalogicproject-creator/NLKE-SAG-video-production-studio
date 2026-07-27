@@ -2,6 +2,8 @@
 
 Verbalogix Chamber is a Termux-capable, agent-native short-video production monorepo. The Verbalogix Next.js application owns users, workspaces, brand rules, and production workflow; the SAG Python engine owns canonical revisioned edits, source-backed analysis, FFmpeg rendering, and independent output verification.
 
+The browser observation/action boundary is specified in [SAG Computer-Use Contract v1](docs/SAG_COMPUTER_USE_CONTRACT.md).
+
 ## First milestone
 
 One upload produces distinct, editable drafts for YouTube Shorts, TikTok, and Instagram Reels. Captions are tied to exact transcript word IDs. Accepted drafts become revisioned SAG projects, and a deliverable is not ready until its encoded output passes observation.

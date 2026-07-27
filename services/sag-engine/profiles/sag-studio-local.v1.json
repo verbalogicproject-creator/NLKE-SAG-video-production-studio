@@ -1,0 +1,43 @@
+{
+  "schema_version": "sag-computer-use-profile/1.0",
+  "profile_id": "sag.studio.local",
+  "version": 1,
+  "issuer": "SAG Video",
+  "key_id": "sag-v1-2026-07",
+  "allowed_origins": ["http://127.0.0.1:3000", "http://localhost:3000"],
+  "adapter_id": "sag-studio-dom-v1",
+  "entities": [
+    {
+      "entity_id": "studio.timeline.selected_clip",
+      "role": "timeline_item",
+      "locator": {"kind": "sag_entity", "value": "timeline.item:selected"}
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "timeline.set_clip_transform",
+      "entity_ids": ["studio.timeline.selected_clip"],
+      "route": "canonical_command",
+      "safety_class": "safe_reversible",
+      "required_scope": "computer_use:act",
+      "arguments_schema": {
+        "type": "object",
+        "properties": {
+          "item_id": {"type": "string", "minLength": 1},
+          "fit_mode": {"type": "string", "enum": ["fit", "fill", "stretch"]},
+          "scale": {"type": "number", "exclusiveMinimum": 0, "maximum": 20},
+          "x": {"type": "integer"},
+          "y": {"type": "integer"},
+          "opacity": {"type": "number", "minimum": 0, "maximum": 1},
+          "rotation": {"type": "number", "minimum": -360, "maximum": 360}
+        },
+        "required": ["item_id"],
+        "additionalProperties": false
+      },
+      "effect_predicates": ["state_hash_changed", "canonical_revision_increment", "target_visible"],
+      "compensation_action_id": "timeline.set_clip_transform",
+      "checkpoint_policy": "before_after_required"
+    }
+  ],
+  "signature": "DDlHWkJ8G1OrCBbMfnyaEeF9MGY5HYp1y9Up2o6ldCXCtufzzO2ZlPfNKWmR1WtC8VmncISH3fJ9TMHZF5u2AA"
+}

@@ -1,5 +1,13 @@
 # SAG Video current state snapshot
 
+## July 27, 2026 addendum — Computer-Use v1
+
+The repository now includes the feature-gated SAG Computer-Use Contract v1, a buildable NLKE–SAG Manifest V3 extension shell, workspace/audience-isolated browser pairing, signed exact-origin action profiles, explicit screenshot checkpoints, one-use safe-action intents, effect receipts, and compensation. Studio can issue a workspace browser pairing code and exposes stable selected-clip/project-revision semantics for the acceptance action.
+
+Automated verification covers the complete engine acceptance path: observe, explicit before checkpoint, exact-revision `timeline.set_clip_transform` to scale `0.85`, ticket replay denial, explicit after checkpoint, successful effect receipt with checkpoint and canonical-receipt lineage, direct checkpoint download, and compensation to `1.00`. The full Python suite, extension build/checks, frontend typecheck, and optimized Next production build pass. Live unpacked-extension execution in desktop Chrome remains the explicit manual gate.
+
+See [implementation progress](docs/progress/SAG_COMPUTER_USE_V1_2026-07-27.md), [the contract](docs/SAG_COMPUTER_USE_CONTRACT.md), and [capability-intersection research](docs/research/NLKE_SAG_CHROME_EXTENSION_CAPABILITY_INTERSECTIONS.md).
+
 Captured: July 23, 2026 at 16:28 IDT (UTC+03:00)
 
 Repository branch: `main`

@@ -270,6 +270,35 @@ export const sagEngine = {
       method: 'POST', body: JSON.stringify({ workspace_id: projectId, project_id: projectId, sequence_id: projectId }),
     },
   ),
+  pairComputerUse: (workspaceId: string) => engineFetch<{
+    code: string; expires_at: string; workspace_id: string; principal_kind: string; audience: string; scopes: string[];
+  }>(workspaceId, '/api/pairing/start', {
+    method: 'POST', body: JSON.stringify({
+      workspace_id: workspaceId, principal_kind: 'browser_extension', audience: 'computer_use',
+    }),
+  }),
+  computerUseActivities: (workspaceId: string) => engineFetch<{ activities: Array<Record<string, unknown>> }>(
+    workspaceId, '/api/computer-use/activities',
+  ),
+  computerUseActivity: (workspaceId: string, activityId: string) => engineFetch<Record<string, unknown>>(
+    workspaceId, `/api/computer-use/activities/${encodeURIComponent(activityId)}`,
+  ),
+  computerUseActions: (workspaceId: string, activityId: string) => engineFetch<{ actions: Array<Record<string, unknown>> }>(
+    workspaceId, `/api/computer-use/activities/${encodeURIComponent(activityId)}/actions`,
+  ),
+  createComputerUseIntent: (workspaceId: string, activityId: string, body: Record<string, unknown>) =>
+    engineFetch<Record<string, unknown>>(
+      workspaceId, `/api/computer-use/activities/${encodeURIComponent(activityId)}/intents`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  executeComputerUseIntent: (workspaceId: string, intentId: string, ticket: string) =>
+    engineFetch<Record<string, unknown>>(
+      workspaceId, `/api/computer-use/intents/${encodeURIComponent(intentId)}/execute`,
+      { method: 'POST', body: JSON.stringify({ ticket }) },
+    ),
+  computerUseReceipt: (workspaceId: string, receiptId: string) => engineFetch<Record<string, unknown>>(
+    workspaceId, `/api/computer-use/receipts/${encodeURIComponent(receiptId)}`,
+  ),
   spatialSnapshot: (
     workspaceId: string, projectId: string,
     parameters: { focusId?: string | null; depth?: string; hopCount?: number } = {},

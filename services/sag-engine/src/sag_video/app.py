@@ -5,6 +5,7 @@ import importlib.util
 import hmac
 import hashlib
 import json
+import tempfile
 from io import BytesIO
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -15,6 +16,7 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from .commands import CommandService
 from .capabilities import detect_capabilities
@@ -124,6 +126,21 @@ from .screenshots import (
     VisualProofPlanRequest,
     screenshot_schemas,
 )
+from .computer_use import (
+    COMPUTER_USE_SCHEMA_VERSION,
+    COMPUTER_USE_SCOPES,
+    ComputerUseActivityRequest,
+    ComputerUseActivityStateRequest,
+    ComputerUseAttachmentRequest,
+    ComputerUseCompletionRequest,
+    ComputerUseExecutionRequest,
+    ComputerUseIntentRequest,
+    ComputerUseObservationRequest,
+    ComputerUseProfile,
+    ComputerUseService,
+    computer_use_schemas,
+    normalize_computer_use_origin,
+)
 from .production_intelligence import (
     BrollCandidate,
     BrollDecision,
@@ -165,6 +182,7 @@ class Settings:
     storage_cache_dir: str = ".sag-video/cache"
     gcs_bucket: str = ""
     start_render_worker: bool = True
+    computer_use_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -185,6 +203,7 @@ class Settings:
             storage_cache_dir=os.getenv("SAG_VIDEO_STORAGE_CACHE_DIR", ".sag-video/cache"),
             gcs_bucket=os.getenv("SAG_VIDEO_GCS_BUCKET", ""),
             start_render_worker=os.getenv("SAG_VIDEO_START_RENDER_WORKER", "1").lower() not in {"0", "false", "no"},
+            computer_use_enabled=os.getenv("SAG_COMPUTER_USE_V1", "0").lower() in {"1", "true", "yes"},
         )
 
 
@@ -238,6 +257,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     connections = ProviderConnectionService(store)
     delivery = DeliveryService(store, runtime)
     screenshots = ScreenshotService(store)
+    computer_use = ComputerUseService(store, commands, blob_storage)
     capabilities = detect_capabilities()
     capabilities["generative_media"] = {
         "provider": "google",
@@ -301,6 +321,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.close()
 
     application = FastAPI(title="SAG Video", version="0.1.0", lifespan=lifespan)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"chrome-extension://[a-p]{32}",
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type", "X-SAG-Workspace-ID"],
+    )
     application.state.store = store
     application.state.commands = commands
     application.state.media = media
@@ -318,6 +345,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.connections = connections
     application.state.delivery = delivery
     application.state.screenshots = screenshots
+    application.state.computer_use = computer_use
     application.state.generative = generative
     application.state.hf_generative = hf_generative
     application.state.repo_evidence = repo_evidence
@@ -343,6 +371,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         scopes = _scopes(request)
         if "*" not in scopes and scope not in scopes:
             raise HTTPException(403, f"missing required scope: {scope}")
+
+    def _computer_use_workspace(request: Request) -> str:
+        if not settings.computer_use_enabled:
+            raise HTTPException(404, "SAG Computer-Use v1 is disabled")
+        workspace_id = getattr(request.state, "workspace_id", None)
+        if workspace_id in {None, "*"}:
+            workspace_id = request.headers.get("x-sag-workspace-id", "").strip()
+        if not workspace_id:
+            raise HTTPException(400, "workspace identity is required")
+        return str(workspace_id)
+
+    def _computer_use_origin_allowed(request: Request, origin: str) -> None:
+        allowed = list(getattr(request.state, "allowed_origins", []))
+        if allowed and normalize_computer_use_origin(origin) not in allowed:
+            raise HTTPException(403, "active origin is outside the paired principal allowlist")
 
     def _emit_receipt_transition(receipt: Any) -> None:
         project = store.get_project(receipt.project_id)
@@ -475,6 +518,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.state.sequence_id = principal.get("sequence_id")
             request.state.scopes = principal.get("scopes", [])
             request.state.pairing_token = principal.get("token")
+            request.state.principal_kind = principal.get("principal_kind", "terminal")
+            request.state.audience = principal.get("audience", "sag_api")
+            request.state.allowed_origins = principal.get("allowed_origins", [])
+            if principal.get("audience") == "computer_use" and not (
+                request.url.path.startswith("/api/computer-use/")
+                or request.url.path in {"/health", "/api/contract", "/api/pairing/revoke"}
+            ):
+                return JSONResponse(
+                    {"detail": "computer-use token audience does not permit this endpoint", "code": "token_audience_mismatch"},
+                    status_code=403,
+                )
         if not settings.invite_token:
             return await call_next(request)
 
@@ -550,6 +604,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "suggestion": {"identity": "stable auditable suggestion.id tied to an exact source revision"},
                 "screenshot_recipe": {"identity": "immutable semantic capture recipe scoped to a project"},
                 "screenshot_capture": {"identity": "managed image hash bound to one recipe and source revision"},
+                "computer_use_activity": {"identity": "workspace-scoped active-tab activation that expires on navigation, origin change, pause, or timeout"},
+                "computer_use_receipt": {"identity": "append-only effect receipt binding intent, observations, action profile, and underlying canonical receipt"},
             },
             "commands": declared_commands(),
             "actions": declared_actions(),
@@ -569,6 +625,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "production_schemas": production_schemas(),
             "production_intelligence_schemas": production_intelligence_schemas(),
             "screenshot_schemas": screenshot_schemas(),
+            "computer_use_schema_version": COMPUTER_USE_SCHEMA_VERSION,
+            "computer_use_schemas": computer_use_schemas(),
+            "computer_use": {
+                "enabled": settings.computer_use_enabled,
+                "generic_observation": True,
+                "profile_governed_actions": True,
+                "coordinate_fallback": False,
+                "arbitrary_javascript": False,
+                "routine_frame_retention": False,
+                "explicit_checkpoint_retention_days": 30,
+            },
             "projection_version": PROJECTION_VERSION,
             "spatial_frame_schema_version": SPATIAL_FRAME_SCHEMA_VERSION,
             "spatial_computer_use": {
@@ -586,6 +653,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "scopes": _scopes(http_request),
                 "project_id": getattr(http_request.state, "project_id", None),
                 "sequence_id": getattr(http_request.state, "sequence_id", None),
+                "principal_kind": getattr(http_request.state, "principal_kind", None),
+                "audience": getattr(http_request.state, "audience", None),
                 "declared_required_scopes": sorted({entry.required_scope for entry in COMMAND_REGISTRY.values()}),
                 "context_grants_authority": False,
                 "note": "The server evaluates actual authentication, revision, target, and arguments on every invocation.",
@@ -2137,6 +2206,224 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _require_workspace(http_request, artifact.project_id)
         return asdict(artifact)
 
+    # Browser computer-use is workspace-scoped and deliberately separate from
+    # project commands. Signed profiles can route an eligible action into the
+    # canonical command service; unprofiled tabs remain observation-only.
+    @application.post("/api/computer-use/profiles", status_code=201)
+    def install_computer_use_profile(body: ComputerUseProfile, http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:profiles")
+        try:
+            return computer_use.install_profile(workspace_id, body)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.get("/api/computer-use/profiles")
+    def list_computer_use_profiles(http_request: Request, origin: str | None = Query(default=None)) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        try:
+            return {"profiles": computer_use.list_profiles(workspace_id, origin=origin)}
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @application.post("/api/computer-use/activities", status_code=201)
+    def create_computer_use_activity(body: ComputerUseActivityRequest, http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        _computer_use_origin_allowed(http_request, body.origin)
+        try:
+            return computer_use.create_activity(
+                workspace_id, getattr(http_request.state, "actor", "browser"), body,
+            )
+        except KeyError as error:
+            raise HTTPException(404, "computer-use profile not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.get("/api/computer-use/activities")
+    def list_computer_use_activities(http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        return {"activities": computer_use.list_activities(workspace_id)}
+
+    @application.get("/api/computer-use/activities/{activity_id}")
+    def get_computer_use_activity(activity_id: str, http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        try:
+            return computer_use.get_activity(workspace_id, activity_id)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity not found") from error
+        except ValueError as error:
+            raise HTTPException(403, str(error)) from error
+
+    @application.post("/api/computer-use/activities/{activity_id}/state")
+    def set_computer_use_activity_state(
+        activity_id: str, body: ComputerUseActivityStateRequest, http_request: Request,
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        try:
+            return computer_use.pause_activity(workspace_id, activity_id, body.reason)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.post("/api/computer-use/activities/{activity_id}/observations", status_code=201)
+    def create_computer_use_observation(
+        activity_id: str, body: ComputerUseObservationRequest, http_request: Request,
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        _computer_use_origin_allowed(http_request, body.origin)
+        try:
+            return computer_use.observe(workspace_id, activity_id, body)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.get("/api/computer-use/activities/{activity_id}/actions")
+    def list_computer_use_actions(activity_id: str, http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        try:
+            return {"actions": computer_use.actions(workspace_id, activity_id)}
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity not found") from error
+        except ValueError as error:
+            raise HTTPException(403, str(error)) from error
+
+    @application.post("/api/computer-use/activities/{activity_id}/intents", status_code=201)
+    def create_computer_use_intent(
+        activity_id: str, body: ComputerUseIntentRequest, http_request: Request,
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:act")
+        try:
+            return computer_use.create_intent(
+                workspace_id, getattr(http_request.state, "actor", "browser"), activity_id, body,
+            )
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity or observation not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.post("/api/computer-use/intents/{intent_id}/execute", status_code=202)
+    def execute_computer_use_intent(
+        intent_id: str, body: ComputerUseExecutionRequest, http_request: Request,
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:act")
+        try:
+            return computer_use.execute(
+                workspace_id, getattr(http_request.state, "actor", "browser"), intent_id, body,
+            )
+        except KeyError as error:
+            raise HTTPException(404, "computer-use intent not found") from error
+        except (ValueError, StaleRevisionError) as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.post("/api/computer-use/executions/{execution_id}/complete")
+    def complete_computer_use_execution(
+        execution_id: str, body: ComputerUseCompletionRequest, http_request: Request,
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:act")
+        try:
+            return computer_use.complete(workspace_id, execution_id, body)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use execution or observation not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.post("/api/computer-use/activities/{activity_id}/checkpoints", status_code=201)
+    async def create_computer_use_checkpoint(
+        activity_id: str, http_request: Request, observation_id: str = Form(...),
+        redaction_state: str = Form(...), file: UploadFile = File(...),
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:capture")
+        suffix = Path(file.filename or "checkpoint").suffix[:12]
+        temporary_path: Path | None = None
+        size = 0
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > 32 * 1024 * 1024:
+                        raise ValueError("computer-use checkpoint exceeds 32 MiB")
+                    temporary.write(chunk)
+            return computer_use.create_checkpoint(
+                workspace_id, activity_id, observation_id, temporary_path,
+                file.content_type or "application/octet-stream", redaction_state,
+            )
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity or observation not found") from error
+        except ValueError as error:
+            raise HTTPException(415, str(error)) from error
+        finally:
+            if temporary_path:
+                temporary_path.unlink(missing_ok=True)
+
+    @application.post("/api/computer-use/activities/{activity_id}/attachments", status_code=201)
+    def attach_computer_use_context(
+        activity_id: str, body: ComputerUseAttachmentRequest, http_request: Request,
+    ) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:attach")
+        try:
+            return computer_use.attach(workspace_id, activity_id, body)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use activity or checkpoint not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.get("/api/computer-use/receipts/{receipt_id}")
+    def get_computer_use_receipt(receipt_id: str, http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        try:
+            return computer_use.get_receipt(workspace_id, receipt_id)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use receipt not found") from error
+        except ValueError as error:
+            raise HTTPException(403, str(error)) from error
+
+    @application.get("/api/computer-use/receipts")
+    def list_computer_use_receipts(http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:observe")
+        return {"receipts": computer_use.list_receipts(workspace_id)}
+
+    @application.get("/api/computer-use/checkpoints/{checkpoint_id}")
+    def get_computer_use_checkpoint(checkpoint_id: str, http_request: Request) -> dict:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:capture")
+        try:
+            return computer_use.get_checkpoint(workspace_id, checkpoint_id)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use checkpoint not found") from error
+        except ValueError as error:
+            raise HTTPException(403, str(error)) from error
+
+    @application.get("/api/computer-use/checkpoints/{checkpoint_id}/content")
+    def download_computer_use_checkpoint(checkpoint_id: str, http_request: Request) -> FileResponse:
+        workspace_id = _computer_use_workspace(http_request)
+        _require_scope(http_request, "computer_use:capture")
+        try:
+            path = computer_use.checkpoint_path(workspace_id, checkpoint_id)
+        except KeyError as error:
+            raise HTTPException(404, "computer-use checkpoint not found") from error
+        except FileNotFoundError as error:
+            raise HTTPException(404, "computer-use checkpoint bytes not found") from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return FileResponse(path, media_type="image/png", filename=f"{checkpoint_id}.png")
+
     @application.get("/api/artifacts/{artifact_id}/content")
     def get_render_artifact(artifact_id: str, http_request: Request) -> FileResponse:
         try:
@@ -2175,7 +2462,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"project": project.model_dump(mode="json"), "selection": ["title_intro"]}
 
     @application.post("/api/pairing/start")
-    def start_pairing(request: PairStartRequest, http_request: Request) -> dict[str, str]:
+    def start_pairing(request: PairStartRequest, http_request: Request) -> dict[str, Any]:
+        if request.principal_kind == "browser_extension":
+            if not settings.computer_use_enabled:
+                raise HTTPException(404, "SAG Computer-Use v1 is disabled")
+            if request.audience != "computer_use" or request.project_id or request.sequence_id:
+                raise HTTPException(422, "browser-extension pairing must be workspace-scoped with computer_use audience")
+            _require_workspace_identity(http_request, request.workspace_id)
+            try:
+                allowed_origins = [normalize_computer_use_origin(value) for value in request.allowed_origins]
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
+            if not store.list_projects_for_workspace(request.workspace_id):
+                raise HTTPException(404, "workspace not found")
+            if settings.computer_use_enabled:
+                computer_use.ensure_builtin_studio_profile(request.workspace_id)
+            code, expires_at = store.start_pairing(
+                request.workspace_id, scopes=list(COMPUTER_USE_SCOPES),
+                principal_kind="browser_extension", audience="computer_use",
+                allowed_origins=allowed_origins,
+            )
+            return {
+                "code": code, "expires_at": expires_at, "workspace_id": request.workspace_id,
+                "principal_kind": "browser_extension", "audience": "computer_use",
+                "scopes": list(COMPUTER_USE_SCOPES),
+            }
         project_id = request.project_id or request.workspace_id
         _require_workspace(http_request, project_id)
         try:
@@ -2185,6 +2496,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         code, expires_at = store.start_pairing(
             store.workspace_for_project(project_id), project_id=project_id,
             sequence_id=request.sequence_id or project_id, scopes=request.scopes,
+            principal_kind=request.principal_kind, audience=request.audience,
+            allowed_origins=request.allowed_origins,
         )
         return {"code": code, "expires_at": expires_at}
 
@@ -2198,6 +2511,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "access_token": token, "expires_at": expires_at,
             "workspace_id": principal["workspace_id"], "project_id": principal.get("project_id"),
             "sequence_id": principal.get("sequence_id"), "scopes": principal.get("scopes", []),
+            "principal_kind": principal.get("principal_kind", "terminal"),
+            "audience": principal.get("audience", "sag_api"),
+            "allowed_origins": principal.get("allowed_origins", []),
         }
 
     @application.post("/api/pairing/revoke")

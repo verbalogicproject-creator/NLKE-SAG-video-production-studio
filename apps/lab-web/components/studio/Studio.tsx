@@ -103,6 +103,7 @@ export function Studio({
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [pairCode, setPairCode] = useState('');
+  const [pairKind, setPairKind] = useState<'codex' | 'computer_use'>('codex');
   const [captureOpen, setCaptureOpen] = useState(false);
   const [depth, setDepth] = useState<StudioDepth>(initialProduction.active_depth);
   const [spatial, setSpatial] = useState<SpatialSnapshot>(initialSpatial);
@@ -217,6 +218,12 @@ export function Studio({
     }, intervalMs);
     return () => window.clearInterval(timer);
   }, [controlProject.id, runtimeConnection]);
+
+  useEffect(() => {
+    const refreshForComputerUse = () => void refresh(true).catch(() => undefined);
+    window.addEventListener('sag:computer-use:refresh', refreshForComputerUse);
+    return () => window.removeEventListener('sag:computer-use:refresh', refreshForComputerUse);
+  }, [controlProject.id, sequenceId]);
 
   useEffect(() => {
     setSpatialPaused(window.localStorage.getItem(`sag-spatial-paused:${controlProject.id}`) === '1');
@@ -390,6 +397,13 @@ export function Studio({
 
   async function pair() {
     const result = await operate('pair');
+    setPairKind('codex');
+    setPairCode(String(result.code));
+  }
+
+  async function pairComputerUse() {
+    const result = await operate('pair_computer_use');
+    setPairKind('computer_use');
     setPairCode(String(result.code));
   }
 
@@ -437,7 +451,9 @@ export function Studio({
     return () => window.clearInterval(timer);
   }, [renderInFlight, latestRender?.id]);
 
-  return <div className="studio-root" ref={awareness.rootRef} data-sag-entity-id="viewport:studio" data-sag-action-ids="spatial.reset_view">
+  return <div className="studio-root" ref={awareness.rootRef} data-sag-entity-id="viewport:studio"
+    data-sag-project-id={controlProject.id} data-sag-project-revision={project.revision}
+    data-sag-action-ids="spatial.reset_view">
     <header className="studio-header" data-sag-entity-id="viewport:studio-header" data-sag-action-ids="spatial.set_depth">
       <div className="studio-project-identity">
         <Link href="/dashboard" className="studio-mark" aria-label="Back to projects"><Film size={19} /></Link>
@@ -460,6 +476,7 @@ export function Studio({
           <button className="studio-button secondary" onClick={() => void command('project.undo', {})} disabled={busy !== '' || !eligible.has('project.undo')} aria-label="Undo"><Undo2 size={15} /><span className="hidden sm:inline">Undo</span></button>
           <button className="studio-button secondary hidden md:flex" onClick={() => void command('project.redo', {})} disabled={busy !== '' || !eligible.has('project.redo')}><Redo2 size={15} />Redo</button>
           <button className="studio-button secondary" onClick={() => void pair()} disabled={busy !== ''} aria-label="Pair Codex"><Link2 size={15} /><span className="hidden sm:inline">Pair Codex</span></button>
+          <button className="studio-button secondary hidden md:flex" onClick={() => void pairComputerUse()} disabled={busy !== ''} aria-label="Pair browser computer use"><MonitorPlay size={15} />Pair browser</button>
           <button className="studio-button director-trigger" aria-pressed={production.current_stage === 'director'} aria-label="Director" onClick={() => changeStage('director')}><WandSparkles size={15} /><span className="hidden sm:inline">Director</span></button>
           <button className="studio-button primary" onClick={() => void operate('render')} disabled={busy !== '' || renderInFlight}><CirclePlay size={15} />{renderInFlight ? 'Rendering' : 'Render'}</button>
           <button className="studio-icon-button" onClick={() => setActivityOpen((value) => !value)} aria-label="Open governance"><Activity size={17} /></button>
@@ -491,7 +508,7 @@ export function Studio({
     </form> : null}
 
     {pairCode ? <div className="studio-notice" role="status">
-      <Bot size={17} /><span>Pairing code</span><strong>{pairCode}</strong><span className="text-ink-2">Scoped to this sequence for ten minutes.</span>
+      <Bot size={17} /><span>{pairKind === 'computer_use' ? 'Browser pairing code' : 'Pairing code'}</span><strong>{pairCode}</strong><span className="text-ink-2">{pairKind === 'computer_use' ? 'Workspace-scoped computer-use principal; code expires in ten minutes.' : 'Scoped to this sequence for ten minutes.'}</span>
       <button onClick={() => setPairCode('')} aria-label="Dismiss pairing code"><X size={15} /></button>
     </div> : null}
     {error ? <div className="studio-error" role="alert"><span>{error}</span><button onClick={() => setError('')}><X size={15} /></button></div> : null}
@@ -1329,7 +1346,8 @@ function Inspector({ item, disabled, onCommand, onDelete }: {
     event.preventDefault(); const data = new FormData(event.currentTarget);
     void onCommand('timeline.set_title', { item_id: item.id, text: String(data.get('text') ?? '') });
   }
-  return <div className="space-y-5">
+  return <div className="space-y-5" data-sag-entity={['video', 'image'].includes(item.kind) ? 'timeline.item:selected' : undefined}
+    data-sag-item-id={item.id}>
     <div><div className="font-mono text-[9px] text-ink-3">{item.kind.toUpperCase()}</div><h3 className="mt-1 text-sm font-medium text-ink-0">{item.name}</h3><div className="mt-1 font-mono text-[10px] text-ink-2">{timecode(item.start_ticks)} / {timecode(item.duration_ticks)}</div></div>
     {item.kind === 'title' ? <form onSubmit={submitTitle} className="studio-field"><label htmlFor="title-text">Text</label><textarea id="title-text" name="text" defaultValue={item.text ?? ''} maxLength={500} /><button className="studio-button secondary" disabled={disabled}>Apply title</button></form> : null}
     {['video', 'image'].includes(item.kind) ? <>

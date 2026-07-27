@@ -7,7 +7,7 @@ from .migrations import NORMALIZED_SCHEMA
 from .models import utc_now
 
 
-POSTGRES_SCHEMA_VERSION = 10
+POSTGRES_SCHEMA_VERSION = 11
 
 
 def _postgres_schema() -> str:
@@ -207,6 +207,16 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
              ON editorial_records(project_id,kind,updated_at DESC);
            CREATE INDEX IF NOT EXISTS idx_editorial_records_workspace_kind
              ON editorial_records(workspace_id,kind,updated_at DESC);""",
+    ),
+    (
+        11,
+        "browser_extension_pairing_audience",
+        """ALTER TABLE pairings ADD COLUMN IF NOT EXISTS principal_kind TEXT NOT NULL DEFAULT 'terminal';
+           ALTER TABLE pairings ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'sag_api';
+           ALTER TABLE pairings ADD COLUMN IF NOT EXISTS allowed_origins_json TEXT NOT NULL DEFAULT '[]';
+           ALTER TABLE tokens ADD COLUMN IF NOT EXISTS principal_kind TEXT NOT NULL DEFAULT 'terminal';
+           ALTER TABLE tokens ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'sag_api';
+           ALTER TABLE tokens ADD COLUMN IF NOT EXISTS allowed_origins_json TEXT NOT NULL DEFAULT '[]';""",
     ),
 )
 
