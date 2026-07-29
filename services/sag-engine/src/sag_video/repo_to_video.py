@@ -390,8 +390,11 @@ def resolved_generation_prompt_revision(
             }
             for scene in storyboard.scenes
         ],
-        "music": brief.music_prompt,
-        "narration": " ".join(scene.narration for scene in storyboard.scenes),
+        "music": {"model": "lyria-3-clip-preview", "prompt": brief.music_prompt},
+        "narration": {
+            "model": "kokoro-82m-onnx",
+            "text": " ".join(scene.narration for scene in storyboard.scenes),
+        },
     }
     encoded = json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -430,11 +433,11 @@ def prompt_studio_preview(request: PromptStudioPreviewRequest) -> dict[str, Any]
             ),
             _prompt_module(
                 identity="planning.narration_guidance", label="Narration guidance", stage="planning",
-                component="Narration planning", model="gemini-3.1-flash-tts-preview",
+                component="Narration planning", model="kokoro-82m-onnx",
                 content=brief.narration_guidance, dispatch="planning_context",
                 editable_field="narration_guidance",
                 consumers=["narration review", "future voice controls"],
-                warnings=["Current TTS dispatch uses the reviewed scene narration as its direct input."],
+                warnings=["Current TTS dispatch is local Kokoro and uses the reviewed scene narration as its direct input."],
             ),
         ])
     if brief is not None and storyboard is not None:
@@ -459,8 +462,8 @@ def prompt_studio_preview(request: PromptStudioPreviewRequest) -> dict[str, Any]
         narration = " ".join(scene.narration for scene in storyboard.scenes)
         modules.append(_prompt_module(
             identity="generation.narration_script", label="Resolved narration script", stage="generation",
-            component="Narration", model="gemini-3.1-flash-tts-preview", content=narration,
-            dispatch="derived_provider_input", consumers=["Gemini TTS", *[scene.id for scene in storyboard.scenes]],
+            component="Narration", model="kokoro-82m-onnx", content=narration,
+            dispatch="derived_provider_input", consumers=["Local Kokoro TTS", *[scene.id for scene in storyboard.scenes]],
         ))
         revision = resolved_generation_prompt_revision(storyboard, brief, aspect_ratio=request.aspect_ratio)
     else:

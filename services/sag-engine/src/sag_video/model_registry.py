@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 class ModelDescriptor(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$")
-    provider: Literal["google", "hf_fal"]
+    provider: Literal["google", "hf_fal", "local"]
     family: Literal["video", "audio", "music", "image", "reasoning"]
     lifecycle: Literal["preview", "ga", "deprecated"]
     capabilities: list[str] = Field(min_length=1, max_length=32)
@@ -26,7 +26,7 @@ class ModelDescriptor(BaseModel):
     notes: str = Field(default="", max_length=1000)
 
 
-MODEL_REGISTRY_VERSION = "google-gemini-hf-fal-2026-07-27.1"
+MODEL_REGISTRY_VERSION = "google-gemini-hf-fal-local-2026-07-29.1"
 
 GOOGLE_MODELS: tuple[ModelDescriptor, ...] = (
     ModelDescriptor(
@@ -94,7 +94,16 @@ HF_FAL_MODELS: tuple[ModelDescriptor, ...] = (
     ),
 )
 
-MODELS = GOOGLE_MODELS + HF_FAL_MODELS
+LOCAL_MODELS: tuple[ModelDescriptor, ...] = (
+    ModelDescriptor(
+        id="kokoro-82m-onnx", provider="local", family="audio", lifecycle="ga",
+        capabilities=["text_to_speech"], input_modalities=["text"], output_modalities=["audio"],
+        default_for=["narration"], documentation_url="https://huggingface.co/hexgrad/Kokoro-82M",
+        notes="On-device Kokoro-82M ONNX narration. Model assets are locally managed and never uploaded.",
+    ),
+)
+
+MODELS = GOOGLE_MODELS + HF_FAL_MODELS + LOCAL_MODELS
 
 
 def model_registry() -> list[dict[str, Any]]:

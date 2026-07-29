@@ -61,7 +61,7 @@ class GenerativeVideoRequest(BaseModel):
 
 
 class GenerativeAudioRequest(BaseModel):
-    model: str = "gemini-3.1-flash-tts-preview"
+    model: str = "kokoro-82m-onnx"
     text: str = Field(min_length=1, max_length=20000)
     voice_name: str | None = Field(default=None, max_length=80)
     duration_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
@@ -69,7 +69,7 @@ class GenerativeAudioRequest(BaseModel):
 
 class ProviderOperation(BaseModel):
     request_id: str
-    provider: Literal["google", "hf_fal"] = "google"
+    provider: Literal["google", "hf_fal", "local"] = "google"
     model: str
     operation_name: str
     state: Literal["pending", "running", "completed", "failed"] = "pending"

@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3"]
+local-tts = ["numpy>=2", "onnxruntime>=1.20"]
 
 [project.scripts]
 sag-video = "sag_video.cli:main"

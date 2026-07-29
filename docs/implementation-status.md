@@ -11,6 +11,15 @@ evidence remain open gates.
 
 ## Verified Studio delivery checkpoint
 
+- Local Kokoro-82M ONNX narration is now a registered provider-neutral audio
+  model and the default repo-to-video narration path. It lazily loads the
+  configured local model, derives tokens from the bundled tokenizer, validates
+  explicit compact voice vectors, chunks at the model's 510-phoneme-token
+  limit, and returns PCM16 WAV bytes directly to managed intake. Narration
+  receipts retain hashes, duration, chunk/token counts, and bounded runtime
+  metadata without retaining script text or base64 audio. A real Termux smoke
+  generated 5.50 seconds of 24 kHz mono narration in 7.706 seconds; the output
+  measured -23.1 dB mean and -4.3 dB peak before final mix normalization.
 - Studio now targets the sequence selected by the route across project refresh,
   runtime events, spatial frames, managed media, screenshot review, render, and
   delivery. It no longer silently falls back to the control project's first
@@ -78,7 +87,7 @@ The foundational spatial runtime slice is implemented and verified locally:
 - Director now includes an integrated Prompting Studio tab. It exposes editable
   creative direction, Omni continuity, Veo continuity, Lyria music, and
   narration-guidance modules; exact read-only resolved scene, Veo-negative, and
-  Gemini TTS inputs; model capabilities; consumer mapping; heuristic token
+  local Kokoro narration inputs; model capabilities; consumer mapping; heuristic token
   estimates; draft history; warnings; and the resolved generation hash. Prompt
   preview does not dispatch media or emit prompt text to runtime telemetry.
 - Generation idempotency now includes the exact resolved prompt-bundle revision,

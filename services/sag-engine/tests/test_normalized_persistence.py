@@ -118,7 +118,7 @@ def test_legacy_blob_store_migrates_without_losing_history(tmp_path: Path):
     connection = sqlite3.connect(database)
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert not {"legacy_projects", "legacy_events", "legacy_receipts", "legacy_selections"} & tables
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 16
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
@@ -138,7 +138,7 @@ def test_normalized_store_has_no_aggregate_project_or_event_blobs(tmp_path: Path
     assert "after_body" not in columns["events"]
     assert "body" not in columns["receipts"]
     assert "body" not in columns["selections"]
-    assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     connection.close()
 
 

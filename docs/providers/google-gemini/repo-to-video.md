@@ -18,7 +18,7 @@ SAG Video treats a repository as bounded evidence, not as an untrusted prompt.
 6. The proposal creates an `awaiting_user_consent` receipt. It does not mutate
    the timeline or claim that media exists.
 7. After approval, the canonical command gateway generates scenes with Omni/Veo,
-   creates music with Lyria, creates narration with Gemini TTS, observes every
+   creates music with Lyria, creates narration locally with Kokoro-82M ONNX, observes every
    downloaded asset, and only then commits verified assets to the timeline.
 
 The executable generation boundary is `POST
@@ -28,6 +28,13 @@ downloads a bounded HTTPS/inline output, runs canonical media observation, and
 inserts only observed-valid assets through revision-checked timeline commands.
 Missing output, unsafe URLs, failed probing, or failed insertion become a
 terminal failure; provider completion is never publication success.
+
+Local narration uses `SAG_KOKORO_MODEL_DIR` (default:
+`/storage/emulated/0/models/onnx/kokoro-82m-onnx`) and reads its bundled
+tokenizer plus `voices_arrays.npz`. It requires `espeak-ng`, `numpy`, and
+`onnxruntime` only when narration is requested. The local generation receipt
+records hashes, duration, chunk count, and runtime metadata; it never records
+the narration transcript or base64 audio.
 
 The candidate editor's Firebase, Socket.IO state, browser tokens, and simulated
 Veo completion are intentionally not part of this flow.

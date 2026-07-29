@@ -90,6 +90,7 @@ from .generative import (
     GenerativeAudioRequest, GenerativeVideoRequest, GoogleGenerativeAdapter,
     HFInferenceVideoAdapter, ProviderOperation,
 )
+from .kokoro import KOKORO_DEFAULT_MODEL_DIR, KOKORO_MODEL_ID, KokoroOnnxAdapter
 from .repo_to_video import (
     CreativeBrief,
     GitHubEvidenceClient,
@@ -189,6 +190,7 @@ class Settings:
     gcs_bucket: str = ""
     start_render_worker: bool = True
     computer_use_enabled: bool = False
+    kokoro_model_dir: str = KOKORO_DEFAULT_MODEL_DIR
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -210,6 +212,7 @@ class Settings:
             gcs_bucket=os.getenv("SAG_VIDEO_GCS_BUCKET", ""),
             start_render_worker=os.getenv("SAG_VIDEO_START_RENDER_WORKER", "1").lower() not in {"0", "false", "no"},
             computer_use_enabled=os.getenv("SAG_COMPUTER_USE_V1", "0").lower() in {"1", "true", "yes"},
+            kokoro_model_dir=os.getenv("SAG_KOKORO_MODEL_DIR", KOKORO_DEFAULT_MODEL_DIR),
         )
 
 
@@ -267,18 +270,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     computer_use = ComputerUseService(store, commands, blob_storage)
     capabilities = detect_capabilities()
     capabilities["generative_media"] = {
-        "provider": "google",
+        "provider": "multi",
+        "providers": ["google", "hf_fal", "local"],
         "registry_version": MODEL_REGISTRY_VERSION,
         "registry_hash": model_registry_hash(),
         "models": model_registry(),
         "authentication": {
-            "development": "AI Studio API key",
-            "production": "Vertex/ADC or protected provider connection",
+            "google": "AI Studio API key for development; Vertex/ADC or protected provider connection for production",
+            "hf_fal": "server-side HF routed-inference credential",
+            "local": "none; validated local model assets",
             "browser_credentials_allowed": False,
         },
     }
     generative = GoogleGenerativeAdapter()
     hf_generative = HFInferenceVideoAdapter()
+    kokoro = KokoroOnnxAdapter(settings.kokoro_model_dir)
     repo_evidence = GitHubEvidenceClient(os.getenv("GITHUB_TOKEN") or None)
     media = MediaService(
         store,
@@ -356,6 +362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.computer_use = computer_use
     application.state.generative = generative
     application.state.hf_generative = hf_generative
+    application.state.kokoro = kokoro
     application.state.repo_evidence = repo_evidence
     application.state.spatial_frames = spatial_frames
 
@@ -700,6 +707,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _require_workspace(http_request, project_id)
         _require_scope(http_request, "project:write")
         project = store.get_project(project_id)
+        if body.model == KOKORO_MODEL_ID:
+            try:
+                audio, telemetry = kokoro.synthesize(body.text, voice=body.voice_name or "af")
+                imported = media.import_file(
+                    project_id, BytesIO(audio), "narration-kokoro.wav", "audio/wav",
+                    request_id=f"kokoro_{telemetry['output_sha256'][:32]}",
+                    actor=getattr(http_request.state, "actor", "browser"),
+                )
+            except (OSError, RuntimeError, ValueError, MediaIntakeError) as error:
+                raise HTTPException(422, str(error)) from error
+            if imported.asset is None or imported.receipt.status != ReceiptStatus.OBSERVED_SUCCESS:
+                raise HTTPException(422, "local Kokoro audio failed canonical managed intake")
+            operation_name = f"local-kokoro:{telemetry['output_sha256'][:24]}"
+            receipt = store.create_receipt(
+                project_id=project_id, command="media.generate_audio", status=ReceiptStatus.OBSERVED_SUCCESS,
+                request_id=f"kokoro_generation_{telemetry['output_sha256'][:32]}",
+                actor=getattr(http_request.state, "actor", "browser"),
+                project_revision=store.get_project(project_id).revision,
+                payload={"provider": "local", "model": KOKORO_MODEL_ID, "operation_name": operation_name,
+                         "asset_id": imported.asset.id, "telemetry": telemetry},
+            )
+            operation = ProviderOperation(
+                request_id=receipt.id, provider="local", model=KOKORO_MODEL_ID,
+                operation_name=operation_name, state="completed",
+            )
+            return {"operation": operation.model_dump(mode="json"), "receipt": receipt.model_dump(mode="json"),
+                    "asset": imported.asset.model_dump(mode="json")}
         try:
             operation = generative.start_audio(body)
         except (RuntimeError, ValueError) as error:
@@ -1421,6 +1455,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     **({"asset_id": item["asset_id"]} if item.get("asset_id") else {}),
                     **({"content_sha256": item["content_sha256"]} if item.get("content_sha256") else {}),
                     **({"byte_size": item["byte_size"]} if item.get("byte_size") else {}),
+                    **({"telemetry": item["telemetry"]} if item.get("telemetry") else {}),
                 }
                 for item in operations
             ]
@@ -1503,8 +1538,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _register_started("video", operation, scene.id)
             music = generative.start_audio(GenerativeAudioRequest(model="lyria-3-clip-preview", text=body.creative_brief.music_prompt, duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 30)))
             _register_started("music", music)
-            narration = generative.start_audio(GenerativeAudioRequest(model="gemini-3.1-flash-tts-preview", text=" ".join(scene.narration for scene in body.storyboard.scenes), duration_seconds=min(sum(scene.duration_seconds for scene in body.storyboard.scenes), 600)))
-            _register_started("narration", narration)
+            narration_text = " ".join(scene.narration for scene in body.storyboard.scenes)
+            narration_bytes, narration_telemetry = kokoro.synthesize(narration_text, voice="af")
+            narration_import = media.import_file(
+                project_id, BytesIO(narration_bytes), "repo-narration-kokoro.wav", "audio/wav",
+                request_id=f"{receipt.id}_kokoro_narration", actor=getattr(http_request.state, "actor", "browser"),
+            )
+            if narration_import.asset is None or narration_import.receipt.status != ReceiptStatus.OBSERVED_SUCCESS:
+                raise ValueError("local Kokoro narration failed canonical managed intake")
+            current = store.get_project(project_id)
+            narration_insert = commands.execute(
+                project_id,
+                CommandRequest(
+                    command="timeline.insert_asset", arguments={"asset_id": narration_import.asset.id, "track_id": "track_audio"},
+                    expected_revision=current.revision, request_id=f"{receipt.id}_insert_{narration_import.asset.id}",
+                    actor=getattr(http_request.state, "actor", "browser"),
+                ), scopes=_scopes(http_request),
+            )
+            if narration_insert.status != ReceiptStatus.COMMITTED:
+                raise ValueError("observed local narration could not be inserted on the Narration track")
+            operations.append({
+                "kind": "narration", "request_id": narration_import.receipt.id, "provider": "local",
+                "model": KOKORO_MODEL_ID, "operation_name": f"local-kokoro:{narration_telemetry['output_sha256'][:24]}",
+                "state": "completed", "asset_id": narration_import.asset.id,
+                "content_sha256": narration_telemetry["output_sha256"], "byte_size": narration_telemetry["byte_size"],
+                "telemetry": narration_telemetry,
+            })
+            receipt = store.update_receipt(receipt, ReceiptStatus.ACCEPTED, {"operations": _stored_operations()})
             final_status = (
                 ReceiptStatus.OBSERVED_SUCCESS
                 if operations and all(item.get("asset_id") for item in operations)
