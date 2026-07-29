@@ -95,7 +95,7 @@ class CaptionStyle(BaseModel):
 
 class TimelineItem(BaseModel):
     id: str
-    kind: Literal["video", "audio", "title", "image", "caption"]
+    kind: Literal["video", "audio", "title", "image", "caption", "protected_composite"]
     track_id: str
     name: str
     start_ticks: int = Field(ge=0)
@@ -105,6 +105,7 @@ class TimelineItem(BaseModel):
     source_in_ticks: int = Field(default=0, ge=0)
     source_out_ticks: int | None = Field(default=None, gt=0)
     asset_id: str | None = None
+    protected_screen_composite_id: str | None = None
     color: str = "#17213a"
     text: str | None = None
     x: int = 0

@@ -27,7 +27,7 @@ class RenderMediaSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
     item_id: str
     asset_id: str
-    kind: Literal["video", "audio", "image"]
+    kind: Literal["video", "audio", "image", "protected_composite"]
     asset_sha256: str
     has_audio: bool
     track_name: str
@@ -47,6 +47,7 @@ class RenderMediaSpec(BaseModel):
     crop_keyframes: tuple[dict, ...] = ()
     output_width: int | None = None
     output_height: int | None = None
+    protected_composite_lineage: dict[str, Any] | None = None
 
 
 class RenderTitleSpec(BaseModel):
@@ -71,7 +72,7 @@ class RenderCaptionSpec(BaseModel):
 
 class RenderSpecification(BaseModel):
     model_config = ConfigDict(frozen=True)
-    contract_version: str = "sag-render-0.2"
+    contract_version: str = "sag-render-0.3"
     project_id: str
     project_revision: int
     width: int
@@ -237,7 +238,7 @@ class RenderService:
         captions: list[RenderCaptionSpec] = []
         for track in project.tracks:
             for item in track.items:
-                if item.kind in {"video", "audio", "image"}:
+                if item.kind in {"video", "audio", "image", "protected_composite"}:
                     if not item.asset_id:
                         raise RenderValidationError(f"timeline item {item.id} has no asset")
                     try:
@@ -246,12 +247,59 @@ class RenderService:
                         raise RenderValidationError(f"timeline item {item.id} references a missing asset") from error
                     if asset.intake_status != "observed_valid" or not asset.managed_uri or not asset.sha256:
                         raise RenderValidationError(f"asset {asset.id} is not observed-valid managed media")
-                    if item.kind == "video" and asset.kind != "video":
+                    if item.kind in {"video", "protected_composite"} and asset.kind != "video":
                         raise RenderValidationError(f"video item {item.id} does not reference video media")
                     if item.kind == "audio" and asset.kind != "audio":
                         raise RenderValidationError(f"audio item {item.id} does not reference audio media")
                     if item.kind == "image" and asset.kind != "image":
                         raise RenderValidationError(f"image item {item.id} does not reference image media")
+                    lineage: dict[str, Any] | None = None
+                    if item.kind == "protected_composite":
+                        from .protected_composites import ProtectedScreenComposite
+                        from .screenshots import ScreenshotCapture
+
+                        if not item.protected_screen_composite_id:
+                            raise RenderValidationError(f"protected composite item {item.id} has no lineage record")
+                        try:
+                            record = ProtectedScreenComposite.model_validate(self.store.get_editorial_record(
+                                item.protected_screen_composite_id, kind="protected_screen_composite",
+                            ))
+                            capture = ScreenshotCapture.model_validate(self.store.get_editorial_record(
+                                record.source_capture_id, kind="screenshot_capture",
+                            ))
+                            source = project.asset(record.source_asset_id)
+                            plate = project.asset(record.plate_asset_id)
+                        except KeyError as error:
+                            raise RenderValidationError("protected composite lineage is missing") from error
+                        if record.project_id != project.id or capture.project_id != project.id:
+                            raise RenderValidationError("protected composite lineage crosses project boundaries")
+                        if record.approval_state != "approved" or capture.approval_state != "approved":
+                            raise RenderValidationError("protected composite lineage is not approved")
+                        if (
+                            record.composite_asset_id != asset.id
+                            or record.composite_asset_sha256 != asset.sha256
+                            or record.source_asset_sha256 != source.sha256
+                            or record.source_asset_sha256 != capture.asset_sha256
+                            or record.source_recipe_sha256 != capture.recipe_sha256
+                            or record.plate_asset_sha256 != plate.sha256
+                        ):
+                            raise RenderValidationError("protected composite lineage hash mismatch")
+                        if asset.audio_codec:
+                            raise RenderValidationError("protected composite assets must remain audio-free")
+                        lineage = {
+                            "schema_version": record.schema_version,
+                            "composite_id": record.id,
+                            "source_capture_id": record.source_capture_id,
+                            "source_asset_sha256": record.source_asset_sha256,
+                            "source_recipe_sha256": record.source_recipe_sha256,
+                            "plate_asset_sha256": record.plate_asset_sha256,
+                            "composite_asset_sha256": record.composite_asset_sha256,
+                            "tracking_report_sha256": record.tracking_report_sha256,
+                            "tracking_method": record.tracking_method,
+                            "direct_tracking_ratio": record.direct_tracking_ratio,
+                            "max_untracked_gap_frames": record.max_untracked_gap_frames,
+                            "frame_count": record.frame_count,
+                        }
                     source_out = item.source_in_ticks + item.duration_ticks
                     if item.kind != "image" and asset.duration_ticks and source_out > asset.duration_ticks:
                         raise RenderValidationError(f"item {item.id} exceeds the observed asset duration")
@@ -260,7 +308,8 @@ class RenderService:
                         raise RenderValidationError(f"asset {asset.id} bytes are missing or changed")
                     media.append(RenderMediaSpec(
                         item_id=item.id, asset_id=asset.id, kind=item.kind,
-                        asset_sha256=asset.sha256, has_audio=bool(asset.audio_codec) or item.kind == "audio",
+                        asset_sha256=asset.sha256,
+                        has_audio=(bool(asset.audio_codec) or item.kind == "audio") and item.kind != "protected_composite",
                         track_name=track.name,
                         start_seconds=item.start_ticks / TICKS_PER_SECOND,
                         duration_seconds=item.duration_ticks / TICKS_PER_SECOND,
@@ -271,6 +320,7 @@ class RenderService:
                         source_width=asset.width, source_height=asset.height,
                         crop_keyframes=tuple(entry.model_dump(mode="json") for entry in item.crop_keyframes),
                         output_width=item.width, output_height=item.height,
+                        protected_composite_lineage=lineage,
                     ))
                 elif item.kind == "title":
                     titles.append(RenderTitleSpec(
@@ -285,7 +335,7 @@ class RenderService:
                         words=tuple(entry.model_dump(mode="json") for entry in item.caption_words),
                         style=(item.caption_style or CaptionStyle()).model_dump(mode="json"),
                     ))
-        if not any(entry.kind in {"video", "image"} for entry in media):
+        if not any(entry.kind in {"video", "image", "protected_composite"} for entry in media):
             raise RenderValidationError("the timeline needs at least one observed-valid visual item")
         if project.duration_ticks / TICKS_PER_SECOND > 600:
             raise RenderValidationError("phone renders are limited to ten minutes")
@@ -316,6 +366,10 @@ class RenderService:
             item.has_audio and not item.muted and "narrat" in item.track_name.lower()
             for item in spec.media
         )
+        protected_lineage = [
+            item.protected_composite_lineage for item in spec.media
+            if item.kind == "protected_composite"
+        ]
         checks = [
             check("dimensions", "video_stream_contract", "Canvas dimensions were not observed"),
             check("duration", "duration_contract", "Duration was not observed"),
@@ -325,6 +379,13 @@ class RenderService:
                 code="scene_coverage", passed=bool(spec.media),
                 observed={"rendered_media_items": len(spec.media)}, expected={"minimum": 1},
                 detail="Every frozen media item passed source validation before encoding",
+            ),
+            QCCheck(
+                code="protected_composite_lineage",
+                passed=all(bool(entry) for entry in protected_lineage),
+                observed={"count": len(protected_lineage), "lineage": protected_lineage},
+                expected={"every_protected_composite_has_approved_hash_bound_lineage": True},
+                detail="Authentic screen regions remain bound to approved screenshot, plate, output, and tracking hashes",
             ),
             check("caption_readability", "caption_pixels_present", "Captions were not required", default=not bool(spec.captions)),
             QCCheck(
@@ -385,7 +446,7 @@ class RenderService:
         audio_labels: list[str] = []
         for index, item in enumerate(spec.media):
             end = item.source_in_seconds + item.duration_seconds
-            if item.kind in {"video", "image"}:
+            if item.kind in {"video", "image", "protected_composite"}:
                 scaled_w = max(2, round(spec.width * item.scale / 2) * 2)
                 scaled_h = max(2, round(spec.height * item.scale / 2) * 2)
                 if item.crop_keyframes:
@@ -541,6 +602,10 @@ class RenderService:
             provenance={
                 "project_revision": spec.project_revision,
                 "render_contract": spec.contract_version,
+                "protected_composites": [
+                    item.protected_composite_lineage for item in spec.media
+                    if item.protected_composite_lineage
+                ],
                 "observation_contract": contract.model_dump(mode="json", exclude={"artifact_path"}),
             },
             storage_backend=stored.locator.backend,

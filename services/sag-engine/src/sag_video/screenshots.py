@@ -219,6 +219,19 @@ class ScreenshotService:
             raise ValueError("screenshot capture was not found") from error
         if capture.project_id != project_id:
             raise ValueError("screenshot capture belongs to another project")
+        if request.decision == "rejected":
+            active_composites = {
+                item.protected_screen_composite_id
+                for track in project.tracks for item in track.items
+                if item.protected_screen_composite_id
+            }
+            if any(
+                record.get("source_capture_id") == capture.id and record.get("id") in active_composites
+                for record in self.store.list_editorial_records(
+                    kind="protected_screen_composite", project_id=project_id,
+                )
+            ):
+                raise ValueError("remove the active protected composite before rejecting its source screenshot")
         decision_id = f"screenshot_decision_{uuid4().hex[:16]}"
         decision = {
             "id": decision_id, "project_id": project_id, "capture_id": capture_id,

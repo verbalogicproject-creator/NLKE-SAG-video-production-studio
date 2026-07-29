@@ -25,6 +25,7 @@ from .store import Store
 class CommandService:
     HANDLERS = {
         "timeline.insert_asset": "_insert_asset",
+        "timeline.insert_protected_composite": "_insert_protected_composite",
         "timeline.move_item": "_move_item",
         "timeline.trim_clip": "_trim_clip",
         "timeline.split_clip": "_split_clip",
@@ -275,6 +276,17 @@ class CommandService:
             raise CommandValidationError(f"unknown asset: {asset_id}") from error
         if asset.intake_status != "observed_valid" or not asset.managed_uri:
             raise CommandValidationError("only observed-valid managed assets can be inserted")
+        protected_outputs = self.store.list_editorial_records(
+            kind="protected_screen_composite", project_id=project.id,
+        )
+        if any(
+            str(record.get("composite_asset_id", "")) == asset.id
+            or bool(asset.sha256 and record.get("composite_asset_sha256") == asset.sha256)
+            for record in protected_outputs
+        ):
+            raise CommandValidationError(
+                "protected composite outputs require reviewed timeline.insert_protected_composite insertion"
+            )
         expected_track_kind = (
             "video" if asset.kind == "video" else
             "audio" if asset.kind == "audio" else
@@ -318,6 +330,81 @@ class CommandService:
         track.items.sort(key=lambda entry: (entry.start_ticks, entry.id))
         project.duration_ticks = max(project.duration_ticks, start + duration)
         return {"asset_id": asset.id, "track_id": track.id, "item_id": item.id, "start_ticks": start, "duration_ticks": duration}
+
+    def _insert_protected_composite(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
+        from .models import TimelineItem
+        from .protected_composites import ProtectedScreenComposite
+        from .screenshots import ScreenshotCapture
+
+        composite_id = str(self._required(arguments, "composite_id"))
+        try:
+            record = ProtectedScreenComposite.model_validate(
+                self.store.get_editorial_record(composite_id, kind="protected_screen_composite")
+            )
+            capture = ScreenshotCapture.model_validate(
+                self.store.get_editorial_record(record.source_capture_id, kind="screenshot_capture")
+            )
+            source = project.asset(record.source_asset_id)
+            plate = project.asset(record.plate_asset_id)
+            asset = project.asset(record.composite_asset_id)
+        except KeyError as error:
+            raise CommandValidationError("protected composite lineage was not found") from error
+        if record.project_id != project.id or capture.project_id != project.id:
+            raise CommandValidationError("protected composite belongs to another project")
+        if record.approval_state != "approved" or capture.approval_state != "approved":
+            raise CommandValidationError("protected composite and source screenshot must be approved")
+        if record.approved_project_revision != project.revision:
+            raise CommandValidationError("protected composite approval is stale for this project revision")
+        if any(
+            candidate.intake_status != "observed_valid" or not candidate.managed_uri or not candidate.sha256
+            for candidate in (source, plate, asset)
+        ):
+            raise CommandValidationError("protected composite lineage contains invalid managed media")
+        if (
+            not (source.sha256 == record.source_asset_sha256 == capture.asset_sha256)
+            or capture.asset_id != source.id
+            or capture.recipe_sha256 != record.source_recipe_sha256
+            or plate.sha256 != record.plate_asset_sha256
+            or asset.sha256 != record.composite_asset_sha256
+        ):
+            raise CommandValidationError("protected composite lineage hash mismatch")
+        if asset.kind != "video" or not asset.duration_ticks:
+            raise CommandValidationError("protected composite output must be observed timed video")
+        if asset.audio_codec:
+            raise CommandValidationError("protected composite output must not contain audio")
+        if any(
+            item.protected_screen_composite_id == record.id
+            for track in project.tracks for item in track.items
+        ):
+            raise CommandValidationError("protected composite is already active on the timeline")
+        requested_track = arguments.get("track_id")
+        track = next((
+            candidate for candidate in project.tracks
+            if candidate.kind == "video" and (requested_track is None or candidate.id == requested_track)
+        ), None)
+        if track is None:
+            raise CommandValidationError("no compatible video track exists")
+        default_start = max((item.start_ticks + item.duration_ticks for item in track.items), default=0)
+        start = int(arguments.get("start_ticks", default_start))
+        if start < 0:
+            raise CommandValidationError("start_ticks must not be negative")
+        item = TimelineItem(
+            id=f"item_{uuid4().hex[:16]}", kind="protected_composite", track_id=track.id,
+            name=asset.name, start_ticks=start, duration_ticks=asset.duration_ticks,
+            source_in_ticks=0, source_out_ticks=asset.duration_ticks, asset_id=asset.id,
+            protected_screen_composite_id=record.id, color="#165266",
+        )
+        track.items.append(item)
+        track.items.sort(key=lambda entry: (entry.start_ticks, entry.id))
+        project.duration_ticks = max(project.duration_ticks, start + item.duration_ticks)
+        return {
+            "composite_id": record.id, "asset_id": asset.id, "track_id": track.id,
+            "item_id": item.id, "start_ticks": start, "duration_ticks": item.duration_ticks,
+            "source_asset_sha256": record.source_asset_sha256,
+            "plate_asset_sha256": record.plate_asset_sha256,
+            "composite_asset_sha256": record.composite_asset_sha256,
+            "tracking_report_sha256": record.tracking_report_sha256,
+        }
 
     def _move_item(self, project: Project, arguments: dict[str, Any]) -> dict[str, Any]:
         item_id = str(self._required(arguments, "item_id"))

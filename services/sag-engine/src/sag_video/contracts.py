@@ -72,6 +72,24 @@ COMMAND_REGISTRY: dict[str, CommandDeclaration] = {
             effect={"kind": "canonical_revision_readback", "independent_failure_domain": False},
         ),
         CommandDeclaration(
+            name="timeline.insert_protected_composite",
+            handler_key="insert_protected_composite",
+            description="Insert one approved evidence-bound protected screen composite at its exact reviewed revision.",
+            arguments_schema=_object_schema(
+                {
+                    "composite_id": {"type": "string", "minLength": 1},
+                    "track_id": {"type": "string", "minLength": 1},
+                    "start_ticks": {"type": "integer", "minimum": 0},
+                },
+                ["composite_id"],
+            ),
+            entity_types=["protected_screen_composite", "screenshot_capture", "asset", "track", "timeline_item"],
+            active_when="composite and source screenshot are approved, hash-valid, and bound to the exact project revision",
+            confirmation_policy="exact_human_confirmation",
+            eligible_surfaces=["studio", "cli", "test"],
+            effect={"kind": "canonical_revision_readback", "independent_failure_domain": False},
+        ),
+        CommandDeclaration(
             name="timeline.move_item",
             handler_key="move_item",
             description="Move a stable timeline item in time or canvas space.",

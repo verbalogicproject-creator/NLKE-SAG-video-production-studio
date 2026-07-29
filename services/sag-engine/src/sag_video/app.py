@@ -126,6 +126,12 @@ from .screenshots import (
     VisualProofPlanRequest,
     screenshot_schemas,
 )
+from .protected_composites import (
+    ProtectedScreenCompositeDecisionRequest,
+    ProtectedScreenCompositeRequest,
+    ProtectedScreenCompositeService,
+    protected_composite_schemas,
+)
 from .computer_use import (
     COMPUTER_USE_SCHEMA_VERSION,
     COMPUTER_USE_SCOPES,
@@ -257,6 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     connections = ProviderConnectionService(store)
     delivery = DeliveryService(store, runtime)
     screenshots = ScreenshotService(store)
+    protected_composites = ProtectedScreenCompositeService(store)
     computer_use = ComputerUseService(store, commands, blob_storage)
     capabilities = detect_capabilities()
     capabilities["generative_media"] = {
@@ -345,6 +352,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.connections = connections
     application.state.delivery = delivery
     application.state.screenshots = screenshots
+    application.state.protected_composites = protected_composites
     application.state.computer_use = computer_use
     application.state.generative = generative
     application.state.hf_generative = hf_generative
@@ -604,6 +612,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "suggestion": {"identity": "stable auditable suggestion.id tied to an exact source revision"},
                 "screenshot_recipe": {"identity": "immutable semantic capture recipe scoped to a project"},
                 "screenshot_capture": {"identity": "managed image hash bound to one recipe and source revision"},
+                "protected_screen_composite": {"identity": "approved authentic screenshot hash tracked inside one generated plate and output hash"},
                 "computer_use_activity": {"identity": "workspace-scoped active-tab activation that expires on navigation, origin change, pause, or timeout"},
                 "computer_use_receipt": {"identity": "append-only effect receipt binding intent, observations, action profile, and underlying canonical receipt"},
             },
@@ -625,6 +634,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "production_schemas": production_schemas(),
             "production_intelligence_schemas": production_intelligence_schemas(),
             "screenshot_schemas": screenshot_schemas(),
+            "protected_composite_schemas": protected_composite_schemas(),
             "computer_use_schema_version": COMPUTER_USE_SCHEMA_VERSION,
             "computer_use_schemas": computer_use_schemas(),
             "computer_use": {
@@ -841,6 +851,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _require_scope(http_request, "project:write")
         try:
             return {"visual_proof_plan": screenshots.create_visual_proof_plan(project_id, body)}
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @application.post("/api/projects/{project_id}/protected-screen-composites", status_code=201)
+    def create_protected_screen_composite(
+        project_id: str, body: ProtectedScreenCompositeRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            record = protected_composites.create(project_id, body)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"composite": record.model_dump(mode="json")}
+
+    @application.get("/api/projects/{project_id}/protected-screen-composites")
+    def list_protected_screen_composites(project_id: str, http_request: Request) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:read")
+        return {"composites": protected_composites.list(project_id)}
+
+    @application.post(
+        "/api/projects/{project_id}/protected-screen-composites/{composite_id}/decisions",
+        status_code=201,
+    )
+    def decide_protected_screen_composite(
+        project_id: str, composite_id: str,
+        body: ProtectedScreenCompositeDecisionRequest, http_request: Request,
+    ) -> dict:
+        _require_workspace(http_request, project_id)
+        _require_scope(http_request, "project:write")
+        try:
+            return protected_composites.decide(project_id, composite_id, body)
         except ValueError as error:
             raise HTTPException(409, str(error)) from error
 

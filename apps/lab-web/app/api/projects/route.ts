@@ -24,7 +24,14 @@ export async function POST(request: Request) {
     const body = await request.json();
     const name = String(body.name ?? '').trim();
     if (!name || name.length > 120) return NextResponse.json({ error: 'invalid_name' }, { status: 422 });
-    const engine = await sagEngine.createProject(workspaceId, name);
+    const preset = String(body.preset ?? 'landscape_1080p');
+    if (!['landscape_1080p', 'vertical_1080p', 'preview_540p'].includes(preset)) {
+      return NextResponse.json({ error: 'invalid_canvas_preset' }, { status: 422 });
+    }
+    const engine = await sagEngine.createProject(
+      workspaceId, name,
+      preset as 'landscape_1080p' | 'vertical_1080p' | 'preview_540p',
+    );
     const project = await db.project.create({
       data: {
         workspaceId,

@@ -61,6 +61,12 @@ SAG is a technical video-production cockpit for a solo expert operator. Its esta
   mixed music bed
 - Added a blocking narration spectral-activity check so normalized hum cannot
   satisfy the production audio gate
+- Added first-class protected screen composite review: authentic source and
+  generated output are shown together, tracking evidence is visible, and only
+  an approved exact-revision record can be inserted through Studio.
+- Dogfooded that review path with the real Omni/SAG composite through managed
+  intake, Studio approval, confirmation-bound insertion, observed rendering,
+  and direct verified MP4/receipt downloads.
 
 ### Current checkpoint
 

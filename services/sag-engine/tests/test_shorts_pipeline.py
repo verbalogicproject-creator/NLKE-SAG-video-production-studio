@@ -105,7 +105,7 @@ def test_short_discovery_acceptance_lineage_and_editable_render_spec(client, tmp
     assert video["crop_keyframes"]
 
     spec = client.app.state.renderer.build_spec(client.app.state.store.get_project(child["id"]))
-    assert spec.contract_version == "sag-render-0.2"
+    assert spec.contract_version == "sag-render-0.3"
     assert spec.captions and spec.media[0].crop_keyframes
     visible = {entry["id"] for entry in client.get("/api/projects").json()["projects"]}
     assert child["id"] in visible

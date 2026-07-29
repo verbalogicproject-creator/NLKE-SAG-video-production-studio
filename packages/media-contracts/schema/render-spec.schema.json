@@ -70,7 +70,9 @@
         "kind": {
           "enum": [
             "video",
-            "audio"
+            "audio",
+            "image",
+            "protected_composite"
           ],
           "title": "Kind",
           "type": "string"
@@ -106,6 +108,19 @@
           ],
           "default": null,
           "title": "Output Width"
+        },
+        "protected_composite_lineage": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Protected Composite Lineage"
         },
         "rotation": {
           "title": "Rotation",
@@ -147,6 +162,10 @@
           "title": "Start Seconds",
           "type": "number"
         },
+        "track_name": {
+          "title": "Track Name",
+          "type": "string"
+        },
         "x": {
           "title": "X",
           "type": "integer"
@@ -162,6 +181,7 @@
         "kind",
         "asset_sha256",
         "has_audio",
+        "track_name",
         "start_seconds",
         "duration_seconds",
         "source_in_seconds",
@@ -241,7 +261,7 @@
       "type": "array"
     },
     "contract_version": {
-      "default": "sag-render-0.2",
+      "default": "sag-render-0.3",
       "title": "Contract Version",
       "type": "string"
     },

@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated: July 27, 2026
+Updated: July 29, 2026
 
 Implementation has advanced from Dogfood Pause 0 into the UI/UX release-candidate
 hardening pass. The approved pause criteria and ordered gates remain recorded in
@@ -271,7 +271,7 @@ Phases 0–2 and the normalized persistence gate are implemented:
   centered low-confidence framing remains available without MediaPipe.
 - Independent 9:16 project acceptance, English/Hebrew active-word captions,
   caption presets/controls, manual crop keyframes, proxy preview, and FFmpeg
-  render-spec `sag-render-0.2` support.
+  render-spec `sag-render-0.3` support.
 - Browser, HTTP, CLI, and MCP generation, review, acceptance, caption, crop,
   render, cancellation, and receipt surfaces.
 
@@ -328,6 +328,39 @@ Remaining hardening includes wrong-dimension fixtures, richer FFmpeg progress,
 a curated human clip-quality benchmark, and longer target-phone thermal
 testing. Output caption-contrast and integrated-loudness predicates are now
 part of independent observation.
+
+## Protected screen composites
+
+The first evidence-safe generated-motion primitive is implemented as
+`sag-protected-screen-composite/1.0`:
+
+- A record binds an approved immutable screenshot capture, the generated plate,
+  the audio-free composite output, the source crop, and the tracking-report hash.
+- Creation blocks weak tracking, excessive untracked gaps, out-of-bounds crops,
+  mismatched frame counts, invalid managed media, and composite-owned audio.
+- Approval is a human Studio decision pinned to the exact project revision.
+  Insertion is a separate confirmation-bound Studio command and is absent from
+  MCP-eligible command surfaces.
+- The canonical timeline retains the composite record ID. SQLite migration 16
+  preserves that relationship across revisions and restarts.
+- Render spec `sag-render-0.3`, artifact provenance, and QC preserve the source,
+  recipe, plate, output, and tracking hashes. Generated surroundings remain
+  decorative; only the protected screenshot region may satisfy product claims.
+- Studio Review shows the tracked output beside its authentic source, exposes
+  tracking coverage/gap evidence, and supports reject, approve, and insert.
+
+Automated coverage proves weak-tracking rejection, missing-confirmation denial,
+exact-revision approval, persisted insertion, audio-free FFmpeg compilation, and
+frozen render lineage.
+
+The July 29 local dogfood also passed the actual Studio-backed path with the
+July 28 Omni proof: managed screenshot/plate/composite intake, screenshot and
+composite decisions, exact-confirmation insertion, render, independent QC, and
+sequence-bound artifact/receipt downloads. Artifact
+`artifact_6e65381cbcf94466` and receipt `receipt_68c6280e9d394393` reproduced
+SHA-256 `36b0b239610ef2331899eb4a231043c1c811fd05ccc7b8bf51934b4431e73d35`.
+The detailed lineage and acceptance evidence are recorded in
+`docs/progress/PROTECTED_SCREEN_COMPOSITE_DOGFOOD_2026-07-29.md`.
 
 The persistence contract is frozen for Phase 3 in `docs/persistence-spec.md`.
 The pre-normalization live database backup is retained alongside the development

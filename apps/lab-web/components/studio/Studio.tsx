@@ -12,7 +12,10 @@ import {
 import { CaptureSpool, CompletedCapture, createCaptureSpool, recoverCaptureSpools } from './capture-spool';
 import { DirectorPanel } from './DirectorPanel';
 import { SpatialAwarenessOverlay, useSpatialAwareness } from './SpatialAwareness';
-import type { IntakeStage, ProductionSession, ProductionStage, ScreenshotCaptureRecord, WorkflowMode } from '@/lib/engine';
+import type {
+  IntakeStage, ProductionSession, ProductionStage, ProtectedScreenCompositeRecord,
+  ScreenshotCaptureRecord, WorkflowMode,
+} from '@/lib/engine';
 
 const SpatialCanvas = dynamic(() => import('./SpatialCanvas'), { ssr: false });
 
@@ -736,6 +739,9 @@ function ProductionStageWorkspace({
   const [screenshotCaptures, setScreenshotCaptures] = useState<ScreenshotCaptureRecord[]>([]);
   const [screenshotBusy, setScreenshotBusy] = useState('');
   const [screenshotError, setScreenshotError] = useState('');
+  const [protectedComposites, setProtectedComposites] = useState<ProtectedScreenCompositeRecord[]>([]);
+  const [compositeBusy, setCompositeBusy] = useState('');
+  const [compositeError, setCompositeError] = useState('');
 
   const loadScreenshotCaptures = useCallback(async () => {
     const response = await fetch(`/api/projects/${projectId}/studio/screenshots?sequence_id=${encodeURIComponent(sequenceId)}`, { cache: 'no-store' });
@@ -744,12 +750,22 @@ function ProductionStageWorkspace({
     setScreenshotCaptures(body.captures ?? []);
   }, [projectId, sequenceId]);
 
+  const loadProtectedComposites = useCallback(async () => {
+    const response = await fetch(`/api/projects/${projectId}/studio/protected-composites?sequence_id=${encodeURIComponent(sequenceId)}`, { cache: 'no-store' });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(String(body.message ?? body.error ?? 'Protected composites could not be loaded'));
+    setProtectedComposites(body.composites ?? []);
+  }, [projectId, sequenceId]);
+
   useEffect(() => {
     if (stage !== 'review') return;
     void loadScreenshotCaptures().catch((cause) => {
       setScreenshotError(cause instanceof Error ? cause.message : 'Screenshot review could not be loaded');
     });
-  }, [stage, loadScreenshotCaptures]);
+    void loadProtectedComposites().catch((cause) => {
+      setCompositeError(cause instanceof Error ? cause.message : 'Protected composites could not be loaded');
+    });
+  }, [stage, loadScreenshotCaptures, loadProtectedComposites]);
 
   async function decideScreenshot(captureId: string, decision: 'approved' | 'rejected') {
     setScreenshotBusy(captureId); setScreenshotError('');
@@ -764,6 +780,44 @@ function ProductionStageWorkspace({
       setScreenshotError(cause instanceof Error ? cause.message : 'Screenshot decision failed');
     } finally {
       setScreenshotBusy('');
+    }
+  }
+
+  async function decideProtectedComposite(compositeId: string, decision: 'approved' | 'rejected') {
+    setCompositeBusy(compositeId); setCompositeError('');
+    try {
+      const response = await fetch(`/api/projects/${projectId}/studio/protected-composites/${compositeId}/decisions?sequence_id=${encodeURIComponent(sequenceId)}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(body.message ?? body.error ?? 'Protected composite decision failed'));
+      setProtectedComposites((current) => current.map((entry) => entry.id === compositeId ? body.composite : entry));
+    } catch (cause) {
+      setCompositeError(cause instanceof Error ? cause.message : 'Protected composite decision failed');
+    } finally {
+      setCompositeBusy('');
+    }
+  }
+
+  async function insertProtectedComposite(compositeId: string) {
+    setCompositeBusy(compositeId); setCompositeError('');
+    try {
+      const response = await fetch(`/api/projects/${projectId}/studio`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          operation: 'command', sequenceId, command: 'timeline.insert_protected_composite',
+          arguments: { composite_id: compositeId }, expectedRevision: project.revision, confirm: true,
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(String(body.message ?? body.error ?? 'Protected composite insertion failed'));
+      if (body.result?.status === 'denied') throw new Error(String(body.result?.payload?.reason ?? 'Protected composite insertion was denied'));
+      await onProjectRefresh();
+      await loadProtectedComposites();
+    } catch (cause) {
+      setCompositeError(cause instanceof Error ? cause.message : 'Protected composite insertion failed');
+    } finally {
+      setCompositeBusy('');
     }
   }
 
@@ -822,6 +876,7 @@ function ProductionStageWorkspace({
     const accepted = Object.values(production.scene_decisions).filter((entry) => entry.decision === 'accepted').length;
     const observedReceipts = receipts.filter((receipt) => receipt.status === 'observed_success').length;
     const approvedScreenshots = screenshotCaptures.filter((capture) => capture.approval_state === 'approved' && !capture.stale).length;
+    const activeComposites = protectedComposites.filter((composite) => composite.active && !composite.stale).length;
     return <main className="studio-production-stage" aria-label="Review stage">
       <StageHeading title="Review" detail="Final approval stays blocked until evidence, observation, audio, captions, brand, CTA, and safe areas are checked." />
       <section className="studio-review-checklist" aria-label="Review checklist">
@@ -829,6 +884,7 @@ function ProductionStageWorkspace({
         <ReviewRow label="Scene decisions" value={`${accepted}/${sceneCount} accepted`} ready={sceneCount > 0 && accepted === sceneCount} />
         <ReviewRow label="Observed operations" value={`${observedReceipts} successful receipts`} ready={observedReceipts > 0} />
         <ReviewRow label="Authentic screenshots" value={`${approvedScreenshots}/${screenshotCaptures.length} approved`} ready={approvedScreenshots > 0} />
+        <ReviewRow label="Protected composites" value={`${activeComposites}/${protectedComposites.length} active`} ready={activeComposites > 0} />
         <ReviewRow label="Final human approval" value="Not recorded" ready={false} />
       </section>
       <section className="studio-screenshot-review" aria-label="Authentic screenshot contact sheet">
@@ -847,6 +903,29 @@ function ProductionStageWorkspace({
             </div>
           </div>
         </article>)}</div> : <StageEmpty title="No managed screenshots" detail="Capture authentic SAG checkpoints and bind them to an immutable screenshot recipe." />}
+      </section>
+      <section className="studio-screenshot-review studio-composite-review" aria-label="Protected screen composite review">
+        <header><div><span>Generated plate + authentic UI</span><h2>Protected composite review</h2></div><button type="button" className="studio-button secondary" onClick={() => void loadProtectedComposites()}>Refresh</button></header>
+        <p className="studio-review-explainer">Only the hash-bound screenshot region may support product claims. Generated surroundings remain decorative.</p>
+        {compositeError ? <div className="studio-error" role="alert"><span>{compositeError}</span></div> : null}
+        {protectedComposites.length ? <div className="studio-screenshot-grid">{protectedComposites.map((composite) => <article key={composite.id} className={`studio-screenshot-card ${composite.approval_state}`}>
+          <div className="studio-composite-preview">
+            <img src={`/api/projects/${projectId}/studio/assets/${composite.composite_asset_id}/thumbnail?sequence_id=${encodeURIComponent(sequenceId)}`} alt="Tracked composite output" />
+            <img src={`/api/projects/${projectId}/studio/assets/${composite.source_asset_id}/thumbnail?sequence_id=${encodeURIComponent(sequenceId)}`} alt="Authentic source screenshot" />
+          </div>
+          <div className="studio-screenshot-card-body">
+            <header><strong>{composite.tracking_method.replaceAll('_', ' ')}</strong><span>{composite.active ? 'active' : composite.approval_state}</span></header>
+            <p>{composite.direct_tracked_frames}/{composite.frame_count} frames tracked directly · gap {composite.max_untracked_gap_frames}f</p>
+            <dl><div><dt>Authentic</dt><dd>{composite.source_asset_sha256.slice(0, 12)}</dd></div><div><dt>Plate</dt><dd>{composite.plate_asset_sha256.slice(0, 12)}</dd></div><div><dt>Output</dt><dd>{composite.composite_asset_sha256.slice(0, 12)}</dd></div><div><dt>Tracking</dt><dd>{(composite.direct_tracking_ratio * 100).toFixed(1)}%</dd></div></dl>
+            {composite.stale ? <span className="studio-screenshot-stale">Stale: source or artifact lineage changed</span> : null}
+            {composite.approval_state === 'approved' && !composite.active && !composite.insertion_ready ? <span className="studio-screenshot-stale">Project changed: review again at revision {project.revision}</span> : null}
+            <div className="studio-screenshot-actions studio-composite-actions">
+              <button type="button" className="studio-button secondary" disabled={compositeBusy === composite.id || composite.active} onClick={() => void decideProtectedComposite(composite.id, 'rejected')}>Reject</button>
+              <button type="button" className="studio-button secondary" disabled={compositeBusy === composite.id || composite.stale || composite.active || composite.approval_state === 'approved'} onClick={() => void decideProtectedComposite(composite.id, 'approved')}>Approve</button>
+              <button type="button" className="studio-button primary" disabled={compositeBusy === composite.id || !composite.insertion_ready || composite.active} onClick={() => void insertProtectedComposite(composite.id)}>{composite.active ? 'Inserted' : compositeBusy === composite.id ? 'Working' : 'Insert'}</button>
+            </div>
+          </div>
+        </article>)}</div> : <StageEmpty title="No protected composites" detail="Create an audio-free tracked plate from an approved screenshot, then bind its hashes and tracking report through the engine." />}
       </section>
     </main>;
   }

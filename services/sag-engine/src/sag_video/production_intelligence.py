@@ -327,6 +327,7 @@ class QCCheck(BaseModel):
         "dimensions", "duration", "frame_rate", "representative_decode", "scene_coverage",
         "caption_readability", "caption_timing", "safe_areas", "audio_presence",
         "integrated_loudness", "true_peak", "narration_spectral_activity", "sha256",
+        "protected_composite_lineage",
     ]
     passed: bool
     observed: Any = None

@@ -9,7 +9,7 @@ from uuid import uuid4
 from .models import Asset, Canvas, Project, Receipt, ReceiptStatus, TimelineItem, Track, utc_now
 
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 NORMALIZED_SCHEMA = """
@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS timeline_items (
     id TEXT NOT NULL,
     kind TEXT NOT NULL,
     asset_id TEXT,
+    protected_screen_composite_id TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY(project_id, id),
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -702,9 +703,16 @@ def write_project_snapshot(
         )
         for item in track.items:
             connection.execute(
-                """INSERT INTO timeline_items(project_id,id,kind,asset_id,created_at) VALUES (?,?,?,?,?)
-                   ON CONFLICT(project_id,id) DO UPDATE SET kind=excluded.kind,asset_id=excluded.asset_id""",
-                (project.id, item.id, item.kind, item.asset_id, project.updated_at),
+                """INSERT INTO timeline_items(
+                     project_id,id,kind,asset_id,protected_screen_composite_id,created_at
+                   ) VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(project_id,id) DO UPDATE SET
+                     kind=excluded.kind,asset_id=excluded.asset_id,
+                     protected_screen_composite_id=excluded.protected_screen_composite_id""",
+                (
+                    project.id, item.id, item.kind, item.asset_id,
+                    item.protected_screen_composite_id, project.updated_at,
+                ),
             )
             connection.execute(
                 """INSERT INTO timeline_item_versions(
@@ -790,7 +798,8 @@ def read_project_snapshot(connection: sqlite3.Connection, project_id: str, revis
     ).fetchall()
     for track_row in track_rows:
         item_rows = connection.execute(
-            """SELECT tiv.*, ti.kind, ti.asset_id FROM timeline_item_versions tiv
+            """SELECT tiv.*, ti.kind, ti.asset_id, ti.protected_screen_composite_id
+               FROM timeline_item_versions tiv
                JOIN timeline_items ti ON ti.project_id=tiv.project_id AND ti.id=tiv.item_id
                WHERE tiv.project_id=? AND tiv.revision=? AND tiv.track_id=?
                ORDER BY tiv.start_ticks, tiv.item_id""",
@@ -836,7 +845,9 @@ def read_project_snapshot(connection: sqlite3.Connection, project_id: str, revis
                 "name": item["name"], "start_ticks": item["start_ticks"], "duration_ticks": item["duration_ticks"],
                 "trim_start_ticks": item["trim_start_ticks"], "trim_end_ticks": item["trim_end_ticks"],
                 "source_in_ticks": item["source_in_ticks"], "source_out_ticks": item["source_out_ticks"],
-                "asset_id": item["asset_id"], "color": item["color"], "text": item["text"],
+                "asset_id": item["asset_id"],
+                "protected_screen_composite_id": item["protected_screen_composite_id"] if "protected_screen_composite_id" in item.keys() else None,
+                "color": item["color"], "text": item["text"],
                 "x": item["x"], "y": item["y"], "width": item["width"], "height": item["height"],
                 "fit_mode": item["fit_mode"], "scale": item["scale"], "opacity": item["opacity"],
                 "rotation": item["rotation"], "gain_db": item["gain_db"], "muted": bool(item["muted"]),
@@ -1556,6 +1567,20 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 ("browser_extension_pairing_audience", utc_now()),
             )
             connection.execute("PRAGMA user_version=15")
+        applied.add(15)
+    if 16 not in applied:
+        with connection:
+            if "protected_screen_composite_id" not in _table_columns(connection, "timeline_items"):
+                connection.execute("ALTER TABLE timeline_items ADD COLUMN protected_screen_composite_id TEXT")
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key,value) VALUES ('persistence_schema_version',?)",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (16,?,?)",
+                ("protected_screen_composite_timeline_lineage", utc_now()),
+            )
+            connection.execute("PRAGMA user_version=16")
     connection.execute("PRAGMA foreign_keys=ON")
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:

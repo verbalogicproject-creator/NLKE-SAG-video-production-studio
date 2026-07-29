@@ -258,7 +258,7 @@ paired identities can access source and derived projects without gaining
 cross-workspace authority.
 
 Caption words/styles and crop keyframes are normalized revision children.
-Render spec `sag-render-0.2` compiles them into libass karaoke captions,
+Render spec `sag-render-0.3` compiles them into libass karaoke captions,
 time-varying crop expressions, stable two-person split layouts, and normalized
 audio. The render observer remains the authority for output success.
 

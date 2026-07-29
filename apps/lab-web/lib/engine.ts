@@ -109,6 +109,19 @@ export type ScreenshotCaptureRecord = {
   captured_at: string; stale: boolean;
 };
 
+export type ProtectedScreenCompositeRecord = {
+  id: string; project_id: string; plate_asset_id: string; plate_asset_sha256: string;
+  source_capture_id: string; source_asset_id: string; source_asset_sha256: string;
+  composite_asset_id: string; composite_asset_sha256: string;
+  tracking_report_sha256: string; tracking_method: 'sift_ransac_homography' | 'orb_ransac_homography';
+  frame_count: number; direct_tracked_frames: number; interpolated_frames: number;
+  direct_tracking_ratio: number; min_inlier_count: number; min_inlier_ratio: number;
+  min_opaque_coverage_pixels: number; max_untracked_gap_frames: number;
+  source_commit: string; application_revision: string;
+  approval_state: 'pending' | 'approved' | 'rejected'; approved_project_revision?: number | null;
+  stale: boolean; active: boolean; insertion_ready: boolean; created_at: string;
+};
+
 const baseUrl = () => (process.env.SAG_ENGINE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '');
 
 export const sagEngineUrl = baseUrl;
@@ -171,8 +184,11 @@ function apiMessage(body: unknown, fallback: string): string {
 
 export const sagEngine = {
   health: () => fetch(`${baseUrl()}/health`, { cache: 'no-store' }).then((r) => r.json()),
-  createProject: (workspaceId: string, name: string) => engineFetch<{ project: { id: string; revision: number } }>(
-    workspaceId, '/api/projects', { method: 'POST', body: JSON.stringify({ name, preset: 'landscape_1080p', workspace_id: workspaceId }) },
+  createProject: (
+    workspaceId: string, name: string,
+    preset: 'landscape_1080p' | 'vertical_1080p' | 'preview_540p' = 'landscape_1080p',
+  ) => engineFetch<{ project: { id: string; revision: number } }>(
+    workspaceId, '/api/projects', { method: 'POST', body: JSON.stringify({ name, preset, workspace_id: workspaceId }) },
   ),
   project: (workspaceId: string, projectId: string) => engineFetch<{ project: { id: string; revision: number; tracks?: Array<Record<string, unknown>> } }>(
     workspaceId, `/api/projects/${projectId}`,
@@ -455,6 +471,18 @@ export const sagEngine = {
   ) => engineFetch<{ capture: ScreenshotCaptureRecord }>(
     workspaceId,
     `/api/projects/${encodeURIComponent(projectId)}/screenshot-captures/${encodeURIComponent(captureId)}/decisions`,
+    { method: 'POST', body: JSON.stringify(request) },
+  ),
+  protectedScreenComposites: (workspaceId: string, projectId: string) =>
+    engineFetch<{ composites: ProtectedScreenCompositeRecord[] }>(
+      workspaceId, `/api/projects/${encodeURIComponent(projectId)}/protected-screen-composites`,
+    ),
+  decideProtectedScreenComposite: (
+    workspaceId: string, projectId: string, compositeId: string,
+    request: { decision: 'approved' | 'rejected'; actor: string; note?: string },
+  ) => engineFetch<{ composite: ProtectedScreenCompositeRecord }>(
+    workspaceId,
+    `/api/projects/${encodeURIComponent(projectId)}/protected-screen-composites/${encodeURIComponent(compositeId)}/decisions`,
     { method: 'POST', body: JSON.stringify(request) },
   ),
   commitRepoToVideoStoryboard: (workspaceId: string, projectId: string, request: { receipt_id: string; expected_revision: number; confirmation_id: string; storyboard: Storyboard }) =>
